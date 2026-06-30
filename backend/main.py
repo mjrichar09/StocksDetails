@@ -1,11 +1,15 @@
 """StocksDetails API — FastAPI backend."""
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Header
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from pathlib import Path
+import re
+
+import yfinance as yf
+import pandas as pd
 
 from db import get_supabase, verify_jwt
 from etrade import start_oauth, complete_oauth, get_positions as etrade_positions, get_transactions as etrade_transactions
@@ -225,6 +229,106 @@ async def fidelity_upload_dividends(
     db.table("fidelity_dividends").delete().eq("user_id", user_id).execute()
     db.table("fidelity_dividends").insert([{**r, "user_id": user_id} for r in rows]).execute()
     return {"status": "ok", "imported": len(rows)}
+
+
+# ─── Analytics ────────────────────────────────────────────────────────────────
+
+_CASH_RE = re.compile(r"^(SPAXX|FCASH|FDRXX|FZFXX|VMFXX|\*\*|\d+).*", re.IGNORECASE)
+
+
+def _gather_positions(user_id: str, db):
+    """Return merged {symbol: {"quantity": float, "market_value": float, "cost_basis": float}} dict."""
+    merged: dict[str, dict] = {}
+
+    def add(symbol, quantity, market_value, cost_basis):
+        if not symbol or _CASH_RE.match(symbol):
+            return
+        if symbol not in merged:
+            merged[symbol] = {"quantity": 0.0, "market_value": 0.0, "cost_basis": 0.0}
+        merged[symbol]["quantity"]    += float(quantity    or 0)
+        merged[symbol]["market_value"] += float(market_value or 0)
+        merged[symbol]["cost_basis"]  += float(cost_basis  or 0)
+
+    # Fidelity
+    rows = db.table("fidelity_positions").select("*").eq("user_id", user_id).execute()
+    for r in rows.data:
+        add(r["symbol"], r.get("quantity"), r.get("current_value"), r.get("cost_basis_total"))
+
+    # ETrade
+    conn = db.table("etrade_connections").select("*").eq("user_id", user_id).execute()
+    if conn.data:
+        c = conn.data[0]
+        try:
+            for p in etrade_positions(c["oauth_token"], c["oauth_token_secret"], c["env"]):
+                add(p["symbol"], p.get("quantity"), p.get("market_value"), p.get("cost_basis"))
+        except Exception:
+            pass
+
+    return merged
+
+
+@app.get("/analytics/performance")
+def analytics_performance(days: int = Query(365, ge=1, le=730), user_id: str = Depends(current_user)):
+    """Portfolio value over time using yfinance historical prices."""
+    try:
+        db = get_supabase()
+        positions = _gather_positions(user_id, db)
+        if not positions:
+            return {"dates": [], "portfolio_values": [], "cost_basis": 0.0}
+
+        symbols = list(positions.keys())
+        cost_basis = sum(v["cost_basis"] for v in positions.values())
+
+        raw = yf.download(symbols, period=f"{days}d", interval="1d",
+                          auto_adjust=True, progress=False)["Close"]
+        if isinstance(raw, pd.Series):
+            raw = raw.to_frame(name=symbols[0])
+
+        dates, values = [], []
+        for date, row in raw.iterrows():
+            total = sum(
+                row[sym] * positions[sym]["quantity"]
+                for sym in symbols
+                if sym in row.index and not pd.isna(row[sym])
+            )
+            dates.append(str(date.date()))
+            values.append(round(total, 2))
+
+        return {"dates": dates, "portfolio_values": values, "cost_basis": round(cost_basis, 2)}
+    except Exception:
+        return {"dates": [], "portfolio_values": [], "cost_basis": 0.0}
+
+
+@app.get("/analytics/sectors")
+def analytics_sectors(user_id: str = Depends(current_user)):
+    """Portfolio allocation by GICS sector via yfinance."""
+    try:
+        db = get_supabase()
+        positions = _gather_positions(user_id, db)
+        if not positions:
+            return []
+
+        sector_data: dict[str, dict] = {}
+        for symbol in list(positions.keys())[:20]:
+            try:
+                sector = yf.Ticker(symbol).info.get("sector") or "Other"
+            except Exception:
+                sector = "Other"
+            mv = positions[symbol]["market_value"]
+            if sector not in sector_data:
+                sector_data[sector] = {"value": 0.0, "symbols": []}
+            sector_data[sector]["value"]   += mv
+            sector_data[sector]["symbols"].append(symbol)
+
+        total = sum(v["value"] for v in sector_data.values()) or 1.0
+        result = [
+            {"sector": s, "value": round(v["value"], 2),
+             "pct": round(v["value"] / total * 100, 1), "symbols": v["symbols"]}
+            for s, v in sector_data.items()
+        ]
+        return sorted(result, key=lambda x: x["value"], reverse=True)
+    except Exception:
+        return []
 
 
 @app.get("/status")
