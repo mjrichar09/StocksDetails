@@ -1,0 +1,9 @@
+pyetrade
+python-dotenv
+fastapi
+uvicorn[standard]
+python-multipart
+supabase
+yfinance
+matplotlib
+pandas
