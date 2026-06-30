@@ -92,10 +92,18 @@ create policy "fidelity_dividends: own rows only"
 -- Migration: add dedup constraints to existing tables
 -- Run this if the tables already exist without the constraints.
 -- ============================================================
-alter table fidelity_realized_gains
-  add constraint if not exists fidelity_realized_gains_dedup
-  unique (user_id, symbol, date_sold, proceeds);
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'fidelity_realized_gains_dedup') then
+    alter table fidelity_realized_gains
+      add constraint fidelity_realized_gains_dedup
+      unique (user_id, symbol, date_sold, proceeds);
+  end if;
+end $$;
 
-alter table fidelity_dividends
-  add constraint if not exists fidelity_dividends_dedup
-  unique (user_id, symbol, run_date, amount);
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'fidelity_dividends_dedup') then
+    alter table fidelity_dividends
+      add constraint fidelity_dividends_dedup
+      unique (user_id, symbol, run_date, amount);
+  end if;
+end $$;
