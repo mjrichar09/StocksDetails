@@ -57,7 +57,8 @@ create table if not exists fidelity_realized_gains (
   proceeds      numeric,
   cost_basis    numeric,
   realized_gain numeric,
-  uploaded_at   timestamptz default now()
+  uploaded_at   timestamptz default now(),
+  unique (user_id, symbol, date_sold, proceeds)
 );
 
 alter table fidelity_realized_gains enable row level security;
@@ -76,7 +77,8 @@ create table if not exists fidelity_dividends (
   description      text,
   amount           numeric,
   transaction_type text,
-  uploaded_at      timestamptz default now()
+  uploaded_at      timestamptz default now(),
+  unique (user_id, symbol, run_date, amount)
 );
 
 alter table fidelity_dividends enable row level security;
@@ -85,3 +87,15 @@ create policy "fidelity_dividends: own rows only"
   on fidelity_dividends for all
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
+
+-- ============================================================
+-- Migration: add dedup constraints to existing tables
+-- Run this if the tables already exist without the constraints.
+-- ============================================================
+alter table fidelity_realized_gains
+  add constraint if not exists fidelity_realized_gains_dedup
+  unique (user_id, symbol, date_sold, proceeds);
+
+alter table fidelity_dividends
+  add constraint if not exists fidelity_dividends_dedup
+  unique (user_id, symbol, run_date, amount);

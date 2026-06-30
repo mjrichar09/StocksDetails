@@ -211,8 +211,10 @@ async def fidelity_upload_realized_gains(
     if not rows:
         raise HTTPException(status_code=400, detail="No realized gains found — check CSV format")
     db = get_supabase()
-    db.table("fidelity_realized_gains").delete().eq("user_id", user_id).execute()
-    db.table("fidelity_realized_gains").insert([{**r, "user_id": user_id} for r in rows]).execute()
+    db.table("fidelity_realized_gains").upsert(
+        [{**r, "user_id": user_id} for r in rows],
+        on_conflict="user_id,symbol,date_sold,proceeds"
+    ).execute()
     return {"status": "ok", "imported": len(rows)}
 
 
@@ -226,8 +228,10 @@ async def fidelity_upload_dividends(
     if not rows:
         raise HTTPException(status_code=400, detail="No dividends found — check CSV format")
     db = get_supabase()
-    db.table("fidelity_dividends").delete().eq("user_id", user_id).execute()
-    db.table("fidelity_dividends").insert([{**r, "user_id": user_id} for r in rows]).execute()
+    db.table("fidelity_dividends").upsert(
+        [{**r, "user_id": user_id} for r in rows],
+        on_conflict="user_id,symbol,run_date,amount"
+    ).execute()
     return {"status": "ok", "imported": len(rows)}
 
 
@@ -329,6 +333,51 @@ def analytics_sectors(user_id: str = Depends(current_user)):
         return sorted(result, key=lambda x: x["value"], reverse=True)
     except Exception:
         return []
+
+
+@app.get("/analytics/sparkline")
+def analytics_sparkline(symbol: str = Query(...), user_id: str = Depends(current_user)):
+    """Return 30-day daily close prices for a symbol."""
+    try:
+        hist = yf.download(symbol, period="30d", interval="1d", auto_adjust=True, progress=False)["Close"]
+        if hasattr(hist, "squeeze"):
+            hist = hist.squeeze()
+        if hist.empty:
+            return {"symbol": symbol, "prices": [], "change_pct": 0, "current_price": None}
+        prices = [round(float(p), 2) for p in hist.values if not pd.isna(p)]
+        if len(prices) < 2:
+            return {"symbol": symbol, "prices": prices, "change_pct": 0, "current_price": prices[-1] if prices else None}
+        change_pct = round((prices[-1] - prices[0]) / prices[0] * 100, 2)
+        return {"symbol": symbol, "prices": prices, "change_pct": change_pct, "current_price": prices[-1]}
+    except Exception:
+        return {"symbol": symbol, "prices": [], "change_pct": 0, "current_price": None}
+
+
+# yfinance exchange code → Google Finance exchange suffix
+_GF_EXCHANGE: dict[str, str] = {
+    "NMS": "NASDAQ", "NGM": "NASDAQ", "NCM": "NASDAQ",
+    "NYQ": "NYSE",
+    "PCX": "NYSEARCA",
+    "ASE": "NYSEAMERICAN",
+    "OBB": "OTCMKTS", "PNK": "OTCMKTS", "NIM": "OTCMKTS",
+    "TSX": "TSX", "TOR": "TSX",
+}
+
+
+@app.get("/analytics/exchange")
+def analytics_exchange(symbol: str = Query(...), user_id: str = Depends(current_user)):
+    """Return the Google Finance URL for a symbol by resolving its exchange via yfinance."""
+    try:
+        info = yf.Ticker(symbol).fast_info
+        raw = getattr(info, "exchange", None) or ""
+        exchange = _GF_EXCHANGE.get(raw, raw)
+        if exchange:
+            url = f"https://www.google.com/finance/quote/{symbol}:{exchange}"
+        else:
+            url = f"https://www.google.com/finance/quote/{symbol}"
+        return {"symbol": symbol, "exchange": exchange, "url": url}
+    except Exception:
+        return {"symbol": symbol, "exchange": "", "url": f"https://www.google.com/finance/quote/{symbol}"}
 
 
 @app.get("/status")
