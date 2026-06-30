@@ -6,6 +6,7 @@
   <title>StocksDetails</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
   <style>
     body { background: #0f1117; color: #e2e8f0; font-family: ui-monospace, monospace; }
     .card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; }
@@ -41,6 +42,8 @@
     .loss  { color: #f87171; }
     #toast { display:none; position:fixed; bottom:24px; right:24px; background:#1e293b; border:1px solid #334155;
              color:#e2e8f0; padding:12px 20px; border-radius:8px; font-size:13px; z-index:999; }
+    .analytics-card { opacity: 0; animation: slideUp 0.5s ease forwards; }
+    @keyframes slideUp { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:translateY(0); } }
   </style>
 </head>
 <body>
@@ -202,6 +205,67 @@
             </thead>
             <tbody id="txn-tbody"></tbody>
           </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Analytics -->
+  <div class="card p-5">
+    <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center gap-2">
+        <button class="chevron" data-toggle="analytics-body" onclick="toggleSection('analytics-body')">▾</button>
+        <h2 class="font-semibold text-white">Analytics</h2>
+      </div>
+    </div>
+    <div class="collapsible-wrap" id="analytics-body">
+      <div class="collapsible-inner">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1" id="analytics-grid">
+
+          <!-- Card 1: Allocation -->
+          <div class="card p-4 analytics-card" style="animation-delay:0s">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="text-sm font-semibold text-slate-300">Portfolio Allocation</h3>
+              <div class="flex gap-1">
+                <button id="alloc-broker-btn" class="btn-primary text-xs py-1 px-2" onclick="setAllocView('broker')">By Broker</button>
+                <button id="alloc-symbol-btn" class="btn-secondary text-xs py-1 px-2" onclick="setAllocView('symbol')">By Symbol</button>
+              </div>
+            </div>
+            <div id="chart-allocation" style="height:260px"></div>
+          </div>
+
+          <!-- Card 2: Winners & Losers -->
+          <div class="card p-4 analytics-card" style="animation-delay:0.1s">
+            <h3 class="text-sm font-semibold text-slate-300 mb-3">Winners &amp; Losers</h3>
+            <div id="chart-winners" style="height:260px"></div>
+          </div>
+
+          <!-- Card 3: Performance (full width) -->
+          <div class="card p-4 analytics-card md:col-span-2" style="animation-delay:0.2s">
+            <h3 class="text-sm font-semibold text-slate-300 mb-3">Portfolio Performance</h3>
+            <div id="chart-performance-loading" class="text-slate-400 text-sm py-8 text-center">Fetching price history…</div>
+            <div id="chart-performance" style="height:280px"></div>
+          </div>
+
+          <!-- Card 4: Dividend Income -->
+          <div class="card p-4 analytics-card" style="animation-delay:0.3s">
+            <h3 class="text-sm font-semibold text-slate-300 mb-3">Dividend Income</h3>
+            <div id="chart-dividends-empty" class="hidden text-slate-500 text-sm py-8 text-center">No dividend data yet.</div>
+            <div id="chart-dividends" style="height:260px"></div>
+          </div>
+
+          <!-- Card 5: Realized vs Unrealized -->
+          <div class="card p-4 analytics-card" style="animation-delay:0.4s">
+            <h3 class="text-sm font-semibold text-slate-300 mb-3">Realized vs Unrealized</h3>
+            <div id="chart-realized" style="height:260px"></div>
+          </div>
+
+          <!-- Card 6: Concentration Risk (full width) -->
+          <div class="card p-4 analytics-card md:col-span-2" style="animation-delay:0.5s">
+            <h3 class="text-sm font-semibold text-slate-300 mb-3">Concentration Risk</h3>
+            <div id="chart-concentration" style="height:300px"></div>
+          </div>
+
         </div>
       </div>
     </div>
@@ -437,6 +501,7 @@
 
       // Filter out error entries
       const valid = positions.filter(p => !p.error);
+      window._positions = valid;
       const errors = positions.filter(p => p.error);
 
       if (errors.length) {
@@ -481,6 +546,7 @@
       }).join('');
 
       wrap.classList.remove('hidden');
+      renderAnalytics();
     } catch (e) {
       loading.classList.add('hidden');
       error.textContent = e.message;
@@ -544,6 +610,7 @@
 
       const errors = txns.filter(t => t.error);
       const valid  = txns.filter(t => !t.error);
+      window._transactions = valid;
 
       if (errors.length) {
         error.textContent = errors.map(e => `${e.source}: ${e.error}`).join('; ');
@@ -591,11 +658,239 @@
         </tr>`;
       }).join('');
       wrap.classList.remove('hidden');
+      renderAnalytics();
     } catch (e) {
       loading.classList.add('hidden');
       error.textContent = e.message;
       error.classList.remove('hidden');
     }
+  }
+
+  // ─── Analytics ────────────────────────────────────────────────────────────
+
+  const BASE_CHART = {
+    chart: {
+      background: 'transparent', foreColor: '#94a3b8', toolbar: { show: false },
+      animations: { enabled: true, speed: 700, animateGradually: { enabled: true, delay: 100 } },
+      fontFamily: 'ui-monospace, monospace',
+    },
+    tooltip: { theme: 'dark' },
+    grid: { borderColor: '#334155', strokeDashArray: 3 },
+    dataLabels: { enabled: false },
+  };
+
+  const _charts = {};
+
+  function destroyChart(id) {
+    if (_charts[id]) { _charts[id].destroy(); delete _charts[id]; }
+  }
+
+  // Allocation
+  let _allocView = 'broker';
+  function setAllocView(v) {
+    _allocView = v;
+    document.getElementById('alloc-broker-btn').className = v === 'broker' ? 'btn-primary text-xs py-1 px-2' : 'btn-secondary text-xs py-1 px-2';
+    document.getElementById('alloc-symbol-btn').className = v === 'symbol' ? 'btn-primary text-xs py-1 px-2' : 'btn-secondary text-xs py-1 px-2';
+    renderAllocation();
+  }
+
+  function renderAllocation() {
+    const positions = window._positions || [];
+    if (!positions.length) return;
+    destroyChart('allocation');
+
+    let labels, series;
+    if (_allocView === 'broker') {
+      const groups = {};
+      positions.forEach(p => { groups[p.source] = (groups[p.source] || 0) + (p.market_value || 0); });
+      labels = Object.keys(groups).map(k => k === 'etrade' ? 'E*Trade' : 'Fidelity');
+      series = Object.values(groups);
+    } else {
+      const sorted = [...positions].sort((a, b) => (b.market_value || 0) - (a.market_value || 0));
+      const top = sorted.slice(0, 8);
+      const otherVal = sorted.slice(8).reduce((s, p) => s + (p.market_value || 0), 0);
+      labels = top.map(p => p.symbol);
+      series = top.map(p => p.market_value || 0);
+      if (otherVal > 0) { labels.push('Other'); series.push(otherVal); }
+    }
+
+    _charts['allocation'] = new ApexCharts(document.getElementById('chart-allocation'), {
+      ...BASE_CHART,
+      chart: { ...BASE_CHART.chart, type: 'donut' },
+      series, labels,
+      colors: _allocView === 'broker'
+        ? ['#3b82f6', '#4ade80']
+        : ['#3b82f6','#4ade80','#fb923c','#a78bfa','#f472b6','#38bdf8','#facc15','#f87171','#94a3b8'],
+      legend: { position: 'bottom', fontSize: '12px' },
+      plotOptions: { pie: { donut: { size: '65%', labels: {
+        show: true,
+        total: { show: true, label: 'Total', color: '#e2e8f0',
+          formatter: w => '$' + w.globals.seriesTotals.reduce((a, b) => a + b, 0).toLocaleString('en-US', { maximumFractionDigits: 0 }) }
+      } } } },
+      dataLabels: { enabled: true, formatter: val => val.toFixed(1) + '%', style: { fontSize: '11px' } },
+      stroke: { colors: ['#0f1117'], width: 2 },
+    });
+    _charts['allocation'].render();
+  }
+
+  // Winners & Losers
+  function renderWinnersLosers() {
+    const positions = (window._positions || []).filter(p => p.gain_loss_pct != null);
+    if (!positions.length) return;
+    destroyChart('winners');
+
+    const sorted = [...positions].sort((a, b) => (a.gain_loss_pct || 0) - (b.gain_loss_pct || 0));
+    const losers = sorted.slice(0, 5);
+    const winners = sorted.slice(-5).reverse();
+    const combined = [...losers, ...winners];
+    const vals = combined.map(p => parseFloat((p.gain_loss_pct || 0).toFixed(2)));
+
+    _charts['winners'] = new ApexCharts(document.getElementById('chart-winners'), {
+      ...BASE_CHART,
+      chart: { ...BASE_CHART.chart, type: 'bar' },
+      plotOptions: { bar: { horizontal: true, distributed: true, barHeight: '70%' } },
+      series: [{ name: 'Gain/Loss %', data: vals }],
+      xaxis: { categories: combined.map(p => p.symbol), labels: { formatter: v => v + '%' } },
+      yaxis: { labels: { style: { fontSize: '12px' } } },
+      colors: vals.map(v => v >= 0 ? '#4ade80' : '#f87171'),
+      legend: { show: false },
+      dataLabels: { enabled: true, formatter: v => v + '%', offsetX: 4, style: { fontSize: '11px', colors: ['#e2e8f0'] } },
+    });
+    _charts['winners'].render();
+  }
+
+  // Performance (fetches from backend)
+  async function renderPerformance() {
+    const loadingEl = document.getElementById('chart-performance-loading');
+    loadingEl.classList.remove('hidden');
+    destroyChart('performance');
+    try {
+      const data = await apiFetch('/analytics/performance?days=365');
+      loadingEl.classList.add('hidden');
+      if (!data.dates || !data.dates.length) { loadingEl.textContent = 'No performance data available.'; loadingEl.classList.remove('hidden'); return; }
+
+      _charts['performance'] = new ApexCharts(document.getElementById('chart-performance'), {
+        ...BASE_CHART,
+        chart: { ...BASE_CHART.chart, type: 'area', height: 280 },
+        series: [
+          { name: 'Portfolio Value', data: data.portfolio_values.map((v, i) => [new Date(data.dates[i]).getTime(), parseFloat(v.toFixed(2))]) },
+          { name: 'Cost Basis',      data: data.dates.map(d => [new Date(d).getTime(), parseFloat(data.cost_basis.toFixed(2))]) },
+        ],
+        xaxis: { type: 'datetime', labels: { datetimeUTC: false, style: { fontSize: '11px' } } },
+        yaxis: { labels: { formatter: v => '$' + (v >= 1000 ? (v / 1000).toFixed(0) + 'K' : v.toFixed(0)) } },
+        stroke: { curve: 'smooth', width: [2, 1.5], dashArray: [0, 5] },
+        fill: {
+          type: ['gradient', 'solid'],
+          gradient: { shadeIntensity: 1, opacityFrom: 0.35, opacityTo: 0.02, stops: [0, 100] },
+          opacity: [1, 0],
+        },
+        colors: ['#3b82f6', '#475569'],
+        legend: { position: 'top' },
+        tooltip: { x: { format: 'MMM dd yyyy' }, y: { formatter: v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) } },
+      });
+      _charts['performance'].render();
+    } catch (e) {
+      loadingEl.textContent = 'Could not load performance data.';
+      loadingEl.classList.remove('hidden');
+    }
+  }
+
+  // Dividend Income
+  function renderDividends() {
+    const txns = window._transactions || [];
+    const DIV_TYPES = ['dividend', 'div reinvest', 'interest', 'capital gain'];
+    const divs = txns.filter(t => DIV_TYPES.some(d => (t.transaction_type || '').toLowerCase().includes(d)) && t.amount);
+
+    const emptyEl = document.getElementById('chart-dividends-empty');
+    if (!divs.length) { emptyEl.classList.remove('hidden'); destroyChart('dividends'); return; }
+    emptyEl.classList.add('hidden');
+    destroyChart('dividends');
+
+    const monthly = {};
+    divs.forEach(t => {
+      if (!t.transaction_date) return;
+      const month = t.transaction_date.slice(0, 7);
+      monthly[month] = (monthly[month] || 0) + (t.amount || 0);
+    });
+    const months = Object.keys(monthly).sort();
+    const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    _charts['dividends'] = new ApexCharts(document.getElementById('chart-dividends'), {
+      ...BASE_CHART,
+      chart: { ...BASE_CHART.chart, type: 'bar' },
+      series: [{ name: 'Dividends', data: months.map(m => parseFloat(monthly[m].toFixed(2))) }],
+      xaxis: { categories: months.map(m => { const [y, mo] = m.split('-'); return MONTH_NAMES[+mo - 1] + ' ' + y.slice(2); }), labels: { style: { fontSize: '11px' }, rotate: -30 } },
+      yaxis: { labels: { formatter: v => '$' + v.toFixed(0) } },
+      colors: ['#3b82f6'],
+      plotOptions: { bar: { borderRadius: 3, columnWidth: '60%' } },
+      tooltip: { y: { formatter: v => '$' + v.toFixed(2) } },
+    });
+    _charts['dividends'].render();
+  }
+
+  // Realized vs Unrealized
+  function renderRealized() {
+    const positions = window._positions || [];
+    const txns = window._transactions || [];
+    const unrealized = positions.reduce((s, p) => s + (p.gain_loss || 0), 0);
+    const realized   = txns.filter(t => t.realized_gain != null).reduce((s, t) => s + (t.realized_gain || 0), 0);
+    const DIV_TYPES  = ['dividend', 'div reinvest', 'interest'];
+    const dividends  = txns.filter(t => DIV_TYPES.some(d => (t.transaction_type || '').toLowerCase().includes(d))).reduce((s, t) => s + (t.amount || 0), 0);
+
+    destroyChart('realized');
+    _charts['realized'] = new ApexCharts(document.getElementById('chart-realized'), {
+      ...BASE_CHART,
+      chart: { ...BASE_CHART.chart, type: 'bar' },
+      plotOptions: { bar: { horizontal: true, distributed: true, borderRadius: 4, barHeight: '50%' } },
+      series: [{ name: 'Amount', data: [parseFloat(unrealized.toFixed(2)), parseFloat(realized.toFixed(2)), parseFloat(dividends.toFixed(2))] }],
+      xaxis: { categories: ['Unrealized', 'Realized', 'Dividends'], labels: { formatter: v => '$' + (Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + 'K' : v.toFixed(0)) } },
+      colors: [unrealized >= 0 ? '#4ade80' : '#f87171', realized >= 0 ? '#4ade80' : '#f87171', '#3b82f6'],
+      legend: { show: false },
+      dataLabels: { enabled: true, formatter: v => (v >= 0 ? '+' : '') + '$' + Math.abs(v).toLocaleString('en-US', { maximumFractionDigits: 0 }), style: { fontSize: '12px', colors: ['#e2e8f0'] }, offsetX: 4 },
+      tooltip: { y: { formatter: v => (v >= 0 ? '+' : '') + '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2 }) } },
+    });
+    _charts['realized'].render();
+  }
+
+  // Concentration Risk
+  function renderConcentration() {
+    const positions = window._positions || [];
+    if (!positions.length) return;
+    const total = positions.reduce((s, p) => s + (p.market_value || 0), 0);
+    if (!total) return;
+    destroyChart('concentration');
+
+    const sorted = [...positions]
+      .map(p => ({ symbol: p.symbol, pct: (p.market_value || 0) / total * 100 }))
+      .sort((a, b) => b.pct - a.pct)
+      .slice(0, 20);
+
+    _charts['concentration'] = new ApexCharts(document.getElementById('chart-concentration'), {
+      ...BASE_CHART,
+      chart: { ...BASE_CHART.chart, type: 'bar', height: 300 },
+      plotOptions: { bar: { horizontal: true, distributed: true, borderRadius: 3, barHeight: '70%' } },
+      series: [{ name: '% of Portfolio', data: sorted.map(p => parseFloat(p.pct.toFixed(2))) }],
+      xaxis: { categories: sorted.map(p => p.symbol), labels: { formatter: v => v + '%' } },
+      colors: sorted.map(p => p.pct > 25 ? '#f87171' : p.pct > 15 ? '#fb923c' : '#3b82f6'),
+      legend: { show: false },
+      annotations: { xaxis: [
+        { x: 15, borderColor: '#fb923c', strokeDashArray: 4, label: { text: '15%', style: { color: '#fb923c', background: '#1e293b', fontSize: '11px' } } },
+        { x: 25, borderColor: '#f87171', strokeDashArray: 4, label: { text: '25%', style: { color: '#f87171', background: '#1e293b', fontSize: '11px' } } },
+      ]},
+      tooltip: { y: { formatter: v => v + '% of portfolio' } },
+      dataLabels: { enabled: true, formatter: v => v + '%', style: { fontSize: '11px', colors: ['#e2e8f0'] }, offsetX: 4 },
+    });
+    _charts['concentration'].render();
+  }
+
+  function renderAnalytics() {
+    if (!window._positions) return;
+    renderAllocation();
+    renderWinnersLosers();
+    renderDividends();
+    renderRealized();
+    renderConcentration();
+    renderPerformance();
   }
 
   // ─── Bootstrap ───────────────────────────────────────────────────────────
