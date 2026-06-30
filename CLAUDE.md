@@ -144,6 +144,10 @@ do $$ begin
 end $$;
 ```
 
+## Planned features
+
+See **[ToDo.md](./ToDo.md)** for the full backlog with implementation notes.
+
 ## Known issues / future work
 
 - `analysis/` directory (`portfolio_history.py`, `portfolio_history.png`) is not committed — gitignore patterns may have line-ending issues
