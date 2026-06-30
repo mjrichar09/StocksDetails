@@ -1,0 +1,247 @@
+"""StocksDetails API — FastAPI backend."""
+
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Header
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+from pathlib import Path
+
+from db import get_supabase, verify_jwt
+from etrade import start_oauth, complete_oauth, get_positions as etrade_positions, get_transactions as etrade_transactions
+from fidelity import parse_fidelity_csv, parse_fidelity_realized_gains, parse_fidelity_dividends
+
+app = FastAPI(title="StocksDetails")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    return FileResponse(str(FRONTEND_DIR / "index.html"))
+
+
+# ─── Auth dependency ──────────────────────────────────────────────────────────
+
+def current_user(authorization: str = Header(...)) -> str:
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
+    try:
+        return verify_jwt(authorization[7:])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+
+# ─── E*Trade OAuth ────────────────────────────────────────────────────────────
+
+@app.get("/auth/etrade/connect")
+def etrade_connect(user_id: str = Depends(current_user)):
+    """Start E*Trade OAuth. Returns session_id + auth_url for the user to visit."""
+    session_id, auth_url = start_oauth()
+    return {"session_id": session_id, "auth_url": auth_url}
+
+
+class VerifyBody(BaseModel):
+    session_id: str
+    verifier: str
+    env: str = "live"  # "live" or "sandbox"
+
+
+@app.post("/auth/etrade/verify")
+def etrade_verify(body: VerifyBody, user_id: str = Depends(current_user)):
+    """Complete OAuth: exchange verifier for tokens and persist them."""
+    try:
+        tokens = complete_oauth(body.session_id, body.verifier)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    get_supabase().table("etrade_connections").upsert(
+        {
+            "user_id":             user_id,
+            "oauth_token":         tokens["oauth_token"],
+            "oauth_token_secret":  tokens["oauth_token_secret"],
+            "env":                 body.env,
+        },
+        on_conflict="user_id",
+    ).execute()
+
+    return {"status": "connected"}
+
+
+@app.delete("/auth/etrade/disconnect")
+def etrade_disconnect(user_id: str = Depends(current_user)):
+    get_supabase().table("etrade_connections").delete().eq("user_id", user_id).execute()
+    return {"status": "disconnected"}
+
+
+# ─── Fidelity CSV Upload ──────────────────────────────────────────────────────
+
+@app.post("/fidelity/upload")
+async def fidelity_upload(
+    file: UploadFile = File(...),
+    user_id: str = Depends(current_user),
+):
+    content = await file.read()
+    positions = parse_fidelity_csv(content)
+    if not positions:
+        raise HTTPException(status_code=400, detail="No positions found — check CSV format")
+
+    db = get_supabase()
+    db.table("fidelity_positions").delete().eq("user_id", user_id).execute()
+    db.table("fidelity_positions").insert(
+        [{**p, "user_id": user_id} for p in positions]
+    ).execute()
+
+    return {"status": "ok", "imported": len(positions)}
+
+
+# ─── Positions ────────────────────────────────────────────────────────────────
+
+@app.get("/positions")
+def get_all_positions(user_id: str = Depends(current_user)):
+    """Return combined positions from E*Trade and Fidelity for this user."""
+    db = get_supabase()
+    result = []
+
+    # E*Trade
+    conn = db.table("etrade_connections").select("*").eq("user_id", user_id).execute()
+    if conn.data:
+        c = conn.data[0]
+        try:
+            result.extend(etrade_positions(c["oauth_token"], c["oauth_token_secret"], c["env"]))
+        except Exception as e:
+            err_str = str(e)
+            # Expired/revoked tokens return 401 — delete them so the UI shows reconnect
+            if "401" in err_str or "unauthorized" in err_str.lower():
+                db.table("etrade_connections").delete().eq("user_id", user_id).execute()
+                result.append({"source": "etrade", "error": "Token expired — please reconnect", "reconnect": True})
+            else:
+                result.append({"source": "etrade", "error": err_str})
+
+    # Fidelity
+    rows = db.table("fidelity_positions").select("*").eq("user_id", user_id).execute()
+    for r in rows.data:
+        result.append({
+            "source":        "fidelity",
+            "account":       r.get("account_name"),
+            "symbol":        r["symbol"],
+            "description":   r.get("description"),
+            "quantity":      r.get("quantity"),
+            "last_price":    r.get("last_price"),
+            "market_value":  r.get("current_value"),
+            "cost_basis":    r.get("cost_basis_total"),
+            "gain_loss":     r.get("total_gain_loss"),
+            "gain_loss_pct": r.get("total_gain_loss_pct"),
+        })
+
+    return result
+
+
+@app.get("/transactions")
+def get_all_transactions(user_id: str = Depends(current_user)):
+    """Return combined transaction history (ETrade + Fidelity realized gains + dividends)."""
+    db = get_supabase()
+    result = []
+
+    # ETrade transactions (fetched live)
+    conn = db.table("etrade_connections").select("*").eq("user_id", user_id).execute()
+    if conn.data:
+        c = conn.data[0]
+        try:
+            for t in etrade_transactions(c["oauth_token"], c["oauth_token_secret"], c["env"]):
+                result.append({"source": "etrade", **t})
+        except Exception as e:
+            err_str = str(e)
+            if "401" in err_str or "unauthorized" in err_str.lower():
+                db.table("etrade_connections").delete().eq("user_id", user_id).execute()
+                result.append({"source": "etrade", "error": "Token expired — please reconnect", "reconnect": True})
+            else:
+                result.append({"source": "etrade", "error": err_str})
+
+    # Fidelity realized gains
+    rg = db.table("fidelity_realized_gains").select("*").eq("user_id", user_id).execute()
+    for r in rg.data:
+        result.append({
+            "source":           "fidelity",
+            "transaction_type": "sell",
+            "symbol":           r["symbol"],
+            "description":      r.get("description"),
+            "quantity":         r.get("quantity"),
+            "transaction_date": r.get("date_sold"),
+            "amount":           r.get("proceeds"),
+            "cost_basis":       r.get("cost_basis"),
+            "realized_gain":    r.get("realized_gain"),
+        })
+
+    # Fidelity dividends
+    div = db.table("fidelity_dividends").select("*").eq("user_id", user_id).execute()
+    for r in div.data:
+        result.append({
+            "source":           "fidelity",
+            "transaction_type": r.get("transaction_type", "dividend"),
+            "symbol":           r.get("symbol"),
+            "description":      r.get("description"),
+            "transaction_date": str(r["run_date"]) if r.get("run_date") else None,
+            "amount":           r.get("amount"),
+        })
+
+    return result
+
+
+@app.post("/fidelity/upload/realized-gains")
+async def fidelity_upload_realized_gains(
+    file: UploadFile = File(...),
+    user_id: str = Depends(current_user),
+):
+    content = await file.read()
+    rows = parse_fidelity_realized_gains(content)
+    if not rows:
+        raise HTTPException(status_code=400, detail="No realized gains found — check CSV format")
+    db = get_supabase()
+    db.table("fidelity_realized_gains").delete().eq("user_id", user_id).execute()
+    db.table("fidelity_realized_gains").insert([{**r, "user_id": user_id} for r in rows]).execute()
+    return {"status": "ok", "imported": len(rows)}
+
+
+@app.post("/fidelity/upload/dividends")
+async def fidelity_upload_dividends(
+    file: UploadFile = File(...),
+    user_id: str = Depends(current_user),
+):
+    content = await file.read()
+    rows = parse_fidelity_dividends(content)
+    if not rows:
+        raise HTTPException(status_code=400, detail="No dividends found — check CSV format")
+    db = get_supabase()
+    db.table("fidelity_dividends").delete().eq("user_id", user_id).execute()
+    db.table("fidelity_dividends").insert([{**r, "user_id": user_id} for r in rows]).execute()
+    return {"status": "ok", "imported": len(rows)}
+
+
+@app.get("/status")
+def connection_status(user_id: str = Depends(current_user)):
+    """Return broker connection status for this user."""
+    db = get_supabase()
+    etrade = db.table("etrade_connections").select("env,connected_at").eq("user_id", user_id).execute()
+    fidelity = db.table("fidelity_positions").select("uploaded_at").eq("user_id", user_id).limit(1).execute()
+
+    return {
+        "etrade": {
+            "connected":    bool(etrade.data),
+            "env":          etrade.data[0]["env"] if etrade.data else None,
+            "connected_at": etrade.data[0]["connected_at"] if etrade.data else None,
+        },
+        "fidelity": {
+            "connected":   bool(fidelity.data),
+            "last_upload": fidelity.data[0]["uploaded_at"] if fidelity.data else None,
+        },
+    }
