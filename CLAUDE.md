@@ -37,8 +37,8 @@ Run `schema.sql` in the Supabase SQL editor to create all tables. All tables hav
 |---|---|
 | `etrade_connections` | OAuth tokens per user (one row, upserted) |
 | `fidelity_positions` | CSV positions snapshot, replaced on each upload |
-| `fidelity_realized_gains` | Realized gain/loss CSV, replaced on each upload |
-| `fidelity_dividends` | Dividend/income history CSV, replaced on each upload |
+| `fidelity_realized_gains` | Realized gain/loss CSV, **merged** on upload (deduped on `user_id, symbol, date_sold, proceeds`) |
+| `fidelity_dividends` | Dividend/income history CSV, **merged** on upload (deduped on `user_id, symbol, run_date, amount`) |
 
 E*Trade transactions are fetched live from the API (not stored).
 
@@ -131,6 +131,18 @@ All analytics cards animate in with a staggered `slideUp` CSS animation.
 - Current keys in `.env` are **sandbox** credentials
 - Production (live) access requires separate keys — apply at developer.etrade.com → My Applications → Request Production Access
 - The app is designed for potential limited commercial use; ETrade production approval requires ToS/privacy policy URLs
+
+## Schema migrations
+
+When adding new constraints to existing tables, use a `DO` block — PostgreSQL does not support `ADD CONSTRAINT IF NOT EXISTS`:
+
+```sql
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'constraint_name') then
+    alter table my_table add constraint constraint_name unique (...);
+  end if;
+end $$;
+```
 
 ## Known issues / future work
 
