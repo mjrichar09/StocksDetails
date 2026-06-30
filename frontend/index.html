@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>StocksDetails</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    body { background: #0f1117; color: #e2e8f0; font-family: ui-monospace, monospace; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; }
+    .badge-etrade  { background: #1e3a5f; color: #60a5fa; }
+    .badge-fidelity{ background: #1a3a2a; color: #4ade80; }
+    .badge-error   { background: #3a1a1a; color: #f87171; }
+    .btn-primary { background: #3b82f6; color: white; padding: 8px 18px; border-radius: 6px; cursor: pointer; }
+    .btn-primary:hover { background: #2563eb; }
+    .btn-danger  { background: #ef4444; color: white; padding: 6px 14px; border-radius: 6px; cursor: pointer; }
+    .btn-danger:hover  { background: #dc2626; }
+    .btn-secondary { background: #334155; color: #e2e8f0; padding: 8px 18px; border-radius: 6px; cursor: pointer; }
+    .btn-secondary:hover { background: #475569; }
+    .collapsible-wrap { display: grid; grid-template-rows: 1fr; transition: grid-template-rows 0.3s ease; }
+    .collapsible-wrap.collapsed { grid-template-rows: 0fr; }
+    .collapsible-inner { overflow: hidden; min-height: 0; }
+    .chevron { display: inline-flex; align-items: center; justify-content: center;
+               width: 22px; height: 22px; border-radius: 4px; color: #94a3b8;
+               cursor: pointer; transition: transform 0.3s ease, color 0.15s; font-size: 14px; }
+    .chevron:hover { color: #e2e8f0; background: #334155; }
+    .chevron.collapsed { transform: rotate(-90deg); }
+    input[type=text], input[type=email], input[type=password], input[type=file] {
+      background: #0f1117; border: 1px solid #334155; color: #e2e8f0;
+      padding: 8px 12px; border-radius: 6px; width: 100%; outline: none;
+    }
+    input:focus { border-color: #3b82f6; }
+    table { border-collapse: collapse; width: 100%; }
+    th { color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; padding: 8px 12px; text-align: right; }
+    th:first-child { text-align: left; }
+    td { padding: 8px 12px; font-size: 13px; text-align: right; border-top: 1px solid #1e293b; }
+    td:first-child { text-align: left; }
+    tr:hover td { background: #1e293b; }
+    .gain  { color: #4ade80; }
+    .loss  { color: #f87171; }
+    #toast { display:none; position:fixed; bottom:24px; right:24px; background:#1e293b; border:1px solid #334155;
+             color:#e2e8f0; padding:12px 20px; border-radius:8px; font-size:13px; z-index:999; }
+  </style>
+</head>
+<body>
+
+<!-- Login Screen -->
+<div id="login-screen" class="min-h-screen flex items-center justify-center px-4">
+  <div class="card p-8 w-full max-w-sm">
+    <h1 class="text-xl font-bold mb-1 text-white">StocksDetails</h1>
+    <p class="text-slate-400 text-sm mb-6">Sign in to view your portfolio</p>
+
+    <div class="space-y-3">
+      <input id="auth-email"    type="email"    placeholder="Email" />
+      <input id="auth-password" type="password" placeholder="Password" />
+    </div>
+
+    <div class="flex gap-2 mt-4">
+      <button class="btn-primary flex-1" onclick="signIn()">Sign in</button>
+      <button class="btn-secondary flex-1" onclick="signUp()">Sign up</button>
+    </div>
+    <p id="auth-error" class="text-red-400 text-xs mt-3 hidden"></p>
+  </div>
+</div>
+
+<!-- App Screen -->
+<div id="app-screen" class="hidden max-w-6xl mx-auto px-4 py-8 space-y-6">
+
+  <!-- Header -->
+  <div class="flex items-center justify-between">
+    <h1 class="text-xl font-bold text-white">StocksDetails</h1>
+    <div class="flex items-center gap-3">
+      <span id="user-email" class="text-slate-400 text-sm"></span>
+      <button class="btn-secondary text-sm" onclick="signOut()">Sign out</button>
+    </div>
+  </div>
+
+  <!-- Broker connections -->
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+
+    <!-- E*Trade card -->
+    <div class="card p-5">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="font-semibold text-white">E*Trade</h2>
+        <span id="etrade-badge" class="text-xs px-2 py-1 rounded badge-error">Not connected</span>
+      </div>
+      <div id="etrade-connect-section">
+        <p class="text-slate-400 text-sm mb-3">Connect your E*Trade account via OAuth.</p>
+        <button class="btn-primary text-sm" onclick="etradeConnect()">Connect E*Trade</button>
+      </div>
+      <div id="etrade-verify-section" class="hidden space-y-2">
+        <p class="text-slate-400 text-sm">
+          Authorize on E*Trade, then paste the verification code below.
+        </p>
+        <a id="etrade-auth-link" href="#" target="_blank"
+           class="text-blue-400 text-sm underline block">Open E*Trade authorization page ↗</a>
+        <div class="flex gap-2">
+          <input id="etrade-verifier" type="text" placeholder="Verification code" />
+          <select id="etrade-env" class="bg-slate-800 border border-slate-600 rounded px-2 text-sm text-slate-200">
+            <option value="live">Live</option>
+            <option value="sandbox">Sandbox</option>
+          </select>
+        </div>
+        <div class="flex gap-2">
+          <button class="btn-primary text-sm" onclick="etradeVerify()">Confirm</button>
+          <button class="btn-secondary text-sm" onclick="cancelEtradeConnect()">Cancel</button>
+        </div>
+      </div>
+      <div id="etrade-connected-section" class="hidden">
+        <p id="etrade-connected-info" class="text-slate-400 text-sm mb-2"></p>
+        <button class="btn-danger text-sm" onclick="etradeDisconnect()">Disconnect</button>
+      </div>
+    </div>
+
+    <!-- Fidelity card -->
+    <div class="card p-5">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="font-semibold text-white">Fidelity</h2>
+        <span id="fidelity-badge" class="text-xs px-2 py-1 rounded badge-error">Not connected</span>
+      </div>
+      <p class="text-slate-400 text-sm mb-1">Positions CSV <span class="text-slate-500 text-xs">(Accounts → Portfolio → Download → CSV)</span></p>
+      <div class="flex gap-2 mb-3">
+        <input id="fidelity-file" type="file" accept=".csv" class="flex-1 text-sm" />
+        <button class="btn-primary text-sm whitespace-nowrap" onclick="fidelityUpload()">Upload</button>
+      </div>
+      <p class="text-slate-400 text-sm mb-1">Realized Gains CSV <span class="text-slate-500 text-xs">(Accounts → Tax Forms → Gain/Loss → Export)</span></p>
+      <div class="flex gap-2 mb-3">
+        <input id="fidelity-rg-file" type="file" accept=".csv" class="flex-1 text-sm" />
+        <button class="btn-primary text-sm whitespace-nowrap" onclick="fidelityUploadRG()">Upload</button>
+      </div>
+      <p class="text-slate-400 text-sm mb-1">Dividends CSV <span class="text-slate-500 text-xs">(Accounts → Activity & Orders → History → Download, filter Income)</span></p>
+      <div class="flex gap-2">
+        <input id="fidelity-div-file" type="file" accept=".csv" class="flex-1 text-sm" />
+        <button class="btn-primary text-sm whitespace-nowrap" onclick="fidelityUploadDividends()">Upload</button>
+      </div>
+      <p id="fidelity-info" class="text-slate-400 text-xs mt-2"></p>
+    </div>
+  </div>
+
+  <!-- Positions table -->
+  <div class="card p-5">
+    <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center gap-2">
+        <button class="chevron" data-toggle="positions-body" onclick="toggleSection('positions-body')">▾</button>
+        <h2 class="font-semibold text-white">Positions</h2>
+      </div>
+      <button class="btn-secondary text-sm" onclick="loadPositions()">Refresh</button>
+    </div>
+    <div class="collapsible-wrap" id="positions-body">
+      <div class="collapsible-inner">
+        <!-- Summary bar -->
+        <div id="summary-bar" class="hidden flex flex-wrap gap-6 mb-4 text-sm">
+          <div><span class="text-slate-400">Total Value</span><span id="sum-value" class="ml-2 font-bold text-white"></span></div>
+          <div><span class="text-slate-400">Total Gain/Loss</span><span id="sum-gain" class="ml-2 font-bold"></span></div>
+          <div><span class="text-slate-400">Positions</span><span id="sum-count" class="ml-2 text-white"></span></div>
+        </div>
+        <div id="positions-loading" class="text-slate-400 text-sm py-4">Loading…</div>
+        <div id="positions-empty"   class="hidden text-slate-400 text-sm py-4">No positions yet. Connect a broker above.</div>
+        <div id="positions-error"   class="hidden text-red-400 text-sm py-4"></div>
+        <div id="positions-table-wrap" class="hidden overflow-x-auto">
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th><th>Source</th><th>Qty</th><th>Last Price</th>
+                <th>Market Value</th><th>Cost Basis</th><th>Gain/Loss $</th><th>Gain/Loss %</th>
+              </tr>
+            </thead>
+            <tbody id="positions-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Transactions table -->
+  <div class="card p-5">
+    <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center gap-2">
+        <button class="chevron" data-toggle="txn-body" onclick="toggleSection('txn-body')">▾</button>
+        <h2 class="font-semibold text-white">Transactions</h2>
+      </div>
+      <button class="btn-secondary text-sm" onclick="loadTransactions()">Refresh</button>
+    </div>
+    <div class="collapsible-wrap" id="txn-body">
+      <div class="collapsible-inner">
+        <!-- Summary bar -->
+        <div id="txn-summary-bar" class="hidden flex flex-wrap gap-6 mb-4 text-sm">
+          <div><span class="text-slate-400">Realized Gain/Loss</span><span id="txn-sum-realized" class="ml-2 font-bold"></span></div>
+          <div><span class="text-slate-400">Dividends</span><span id="txn-sum-dividends" class="ml-2 font-bold text-white"></span></div>
+        </div>
+        <div id="txn-loading" class="text-slate-400 text-sm py-4">Loading…</div>
+        <div id="txn-empty"   class="hidden text-slate-400 text-sm py-4">No transactions yet.</div>
+        <div id="txn-error"   class="hidden text-red-400 text-sm py-4"></div>
+        <div id="txn-table-wrap" class="hidden overflow-x-auto">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th><th>Source</th><th>Type</th><th>Symbol</th><th>Description</th>
+                <th>Qty</th><th>Price</th><th>Amount</th><th>Realized Gain</th>
+              </tr>
+            </thead>
+            <tbody id="txn-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div id="toast"></div>
+
+<script>
+  // ─── Config ──────────────────────────────────────────────────────────────
+  // These values are injected at build time or can be set manually here.
+  const SUPABASE_URL = 'https://adarzhsveichajbwqein.supabase.co';
+  const SUPABASE_ANON_KEY = 'sb_publishable_VylVWL47Vn6QUknWB1SSog_aSNIfVpk';
+  const API_BASE = '';  // empty = same origin as the FastAPI server
+
+  const { createClient } = supabase;
+  const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+  let _etradeSessionId = null;
+
+  // ─── Utilities ────────────────────────────────────────────────────────────
+
+  function fmt(n, decimals = 2) {
+    if (n == null) return '—';
+    return Number(n).toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+  }
+  function fmtCurrency(n) {
+    if (n == null) return '—';
+    return '$' + fmt(n);
+  }
+  function gainClass(n) { return n > 0 ? 'gain' : n < 0 ? 'loss' : ''; }
+
+  function toast(msg, isError = false) {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.style.display = 'block';
+    el.style.borderColor = isError ? '#ef4444' : '#334155';
+    clearTimeout(el._t);
+    el._t = setTimeout(() => { el.style.display = 'none'; }, 3500);
+  }
+
+  async function apiFetch(path, opts = {}) {
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session) throw new Error('Not authenticated');
+    const res = await fetch(API_BASE + path, {
+      ...opts,
+      headers: { Authorization: `Bearer ${session.access_token}`, ...opts.headers },
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || `HTTP ${res.status}`);
+    }
+    return res.json();
+  }
+
+  // ─── Auth ─────────────────────────────────────────────────────────────────
+
+  async function signIn() {
+    const email = document.getElementById('auth-email').value.trim();
+    const password = document.getElementById('auth-password').value;
+    const { error } = await sb.auth.signInWithPassword({ email, password });
+    if (error) showAuthError(error.message);
+  }
+
+  async function signUp() {
+    const email = document.getElementById('auth-email').value.trim();
+    const password = document.getElementById('auth-password').value;
+    const { error } = await sb.auth.signUp({ email, password });
+    if (error) showAuthError(error.message);
+    else toast('Check your email to confirm your account.');
+  }
+
+  async function signOut() {
+    await sb.auth.signOut();
+    showLogin();
+  }
+
+  function showAuthError(msg) {
+    const el = document.getElementById('auth-error');
+    el.textContent = msg;
+    el.classList.remove('hidden');
+  }
+
+  // ─── Screen switching ─────────────────────────────────────────────────────
+
+  function showLogin() {
+    document.getElementById('login-screen').classList.remove('hidden');
+    document.getElementById('app-screen').classList.add('hidden');
+  }
+
+  function showApp(session) {
+    document.getElementById('login-screen').classList.add('hidden');
+    document.getElementById('app-screen').classList.remove('hidden');
+    document.getElementById('user-email').textContent = session.user.email;
+    loadStatus();
+    loadPositions();
+    loadTransactions();
+  }
+
+  // ─── Status ───────────────────────────────────────────────────────────────
+
+  async function loadStatus() {
+    try {
+      const s = await apiFetch('/status');
+
+      // E*Trade badge
+      const etBadge = document.getElementById('etrade-badge');
+      if (s.etrade.connected) {
+        etBadge.textContent = s.etrade.env === 'sandbox' ? 'Sandbox' : 'Live';
+        etBadge.className = 'text-xs px-2 py-1 rounded badge-etrade';
+        document.getElementById('etrade-connect-section').classList.add('hidden');
+        document.getElementById('etrade-verify-section').classList.add('hidden');
+        const info = document.getElementById('etrade-connected-section');
+        info.classList.remove('hidden');
+        document.getElementById('etrade-connected-info').textContent =
+          `Connected (${s.etrade.env}) — ${new Date(s.etrade.connected_at).toLocaleDateString()}`;
+      } else {
+        etBadge.textContent = 'Not connected';
+        etBadge.className = 'text-xs px-2 py-1 rounded badge-error';
+        document.getElementById('etrade-connect-section').classList.remove('hidden');
+        document.getElementById('etrade-connected-section').classList.add('hidden');
+      }
+
+      // Fidelity badge
+      const fidBadge = document.getElementById('fidelity-badge');
+      if (s.fidelity.connected) {
+        fidBadge.textContent = 'Uploaded';
+        fidBadge.className = 'text-xs px-2 py-1 rounded badge-fidelity';
+        document.getElementById('fidelity-info').textContent =
+          `Last upload: ${new Date(s.fidelity.last_upload).toLocaleDateString()}`;
+      } else {
+        fidBadge.textContent = 'Not connected';
+        fidBadge.className = 'text-xs px-2 py-1 rounded badge-error';
+      }
+    } catch (e) {
+      console.error('Status error:', e);
+    }
+  }
+
+  // ─── E*Trade OAuth ────────────────────────────────────────────────────────
+
+  async function etradeConnect() {
+    try {
+      const { session_id, auth_url } = await apiFetch('/auth/etrade/connect');
+      _etradeSessionId = session_id;
+      document.getElementById('etrade-auth-link').href = auth_url;
+      document.getElementById('etrade-connect-section').classList.add('hidden');
+      document.getElementById('etrade-verify-section').classList.remove('hidden');
+      window.open(auth_url, '_blank');
+    } catch (e) {
+      toast(e.message, true);
+    }
+  }
+
+  async function etradeVerify() {
+    const verifier = document.getElementById('etrade-verifier').value.trim();
+    const env = document.getElementById('etrade-env').value;
+    if (!verifier) { toast('Paste the verification code first.', true); return; }
+    try {
+      await apiFetch('/auth/etrade/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: _etradeSessionId, verifier, env }),
+      });
+      toast('E*Trade connected!');
+      loadStatus();
+      loadPositions();
+    } catch (e) {
+      toast(e.message, true);
+    }
+  }
+
+  function cancelEtradeConnect() {
+    _etradeSessionId = null;
+    document.getElementById('etrade-verify-section').classList.add('hidden');
+    document.getElementById('etrade-connect-section').classList.remove('hidden');
+  }
+
+  async function etradeDisconnect() {
+    if (!confirm('Disconnect E*Trade?')) return;
+    try {
+      await apiFetch('/auth/etrade/disconnect', { method: 'DELETE' });
+      toast('E*Trade disconnected.');
+      loadStatus();
+      loadPositions();
+    } catch (e) {
+      toast(e.message, true);
+    }
+  }
+
+  // ─── Fidelity Upload ──────────────────────────────────────────────────────
+
+  async function fidelityUpload() {
+    const input = document.getElementById('fidelity-file');
+    if (!input.files.length) { toast('Select a CSV file first.', true); return; }
+    const form = new FormData();
+    form.append('file', input.files[0]);
+    try {
+      const r = await apiFetch('/fidelity/upload', { method: 'POST', body: form });
+      toast(`Fidelity: imported ${r.imported} positions.`);
+      input.value = '';
+      loadStatus();
+      loadPositions();
+    } catch (e) {
+      toast(e.message, true);
+    }
+  }
+
+  // ─── Positions ────────────────────────────────────────────────────────────
+
+  async function loadPositions() {
+    const loading = document.getElementById('positions-loading');
+    const empty   = document.getElementById('positions-empty');
+    const error   = document.getElementById('positions-error');
+    const wrap    = document.getElementById('positions-table-wrap');
+    const summary = document.getElementById('summary-bar');
+
+    loading.classList.remove('hidden');
+    empty.classList.add('hidden');
+    error.classList.add('hidden');
+    wrap.classList.add('hidden');
+    summary.classList.add('hidden');
+
+    try {
+      const positions = await apiFetch('/positions');
+      loading.classList.add('hidden');
+
+      if (!positions.length) {
+        empty.classList.remove('hidden');
+        return;
+      }
+
+      // Filter out error entries
+      const valid = positions.filter(p => !p.error);
+      const errors = positions.filter(p => p.error);
+
+      if (errors.length) {
+        error.textContent = errors.map(e => `${e.source}: ${e.error}`).join('; ');
+        error.classList.remove('hidden');
+        // If a token expired, the backend deleted it — refresh status so the connect button appears
+        if (errors.some(e => e.reconnect)) loadStatus();
+      }
+
+      if (!valid.length) return;
+
+      // Summary
+      const totalValue = valid.reduce((s, p) => s + (p.market_value || 0), 0);
+      const totalGain  = valid.reduce((s, p) => s + (p.gain_loss   || 0), 0);
+      document.getElementById('sum-value').textContent = fmtCurrency(totalValue);
+      const gainEl = document.getElementById('sum-gain');
+      gainEl.textContent = (totalGain >= 0 ? '+' : '') + fmtCurrency(totalGain);
+      gainEl.className = 'ml-2 font-bold ' + gainClass(totalGain);
+      document.getElementById('sum-count').textContent = valid.length;
+      summary.classList.remove('hidden');
+
+      // Table
+      const tbody = document.getElementById('positions-tbody');
+      tbody.innerHTML = valid.map(p => {
+        const src = p.source === 'etrade'
+          ? `<span class="badge-etrade text-xs px-1.5 py-0.5 rounded">E*Trade</span>`
+          : `<span class="badge-fidelity text-xs px-1.5 py-0.5 rounded">Fidelity</span>`;
+        const gainPct = p.gain_loss_pct != null
+          ? `<span class="${gainClass(p.gain_loss_pct)}">${p.gain_loss_pct >= 0 ? '+' : ''}${fmt(p.gain_loss_pct)}%</span>`
+          : '—';
+        return `<tr>
+          <td><span class="text-white font-medium">${p.symbol}</span>
+              <span class="text-slate-500 text-xs ml-1">${p.account || ''}</span></td>
+          <td>${src}</td>
+          <td>${fmt(p.quantity, 3)}</td>
+          <td>${fmtCurrency(p.last_price)}</td>
+          <td class="font-medium">${fmtCurrency(p.market_value)}</td>
+          <td>${fmtCurrency(p.cost_basis)}</td>
+          <td class="${gainClass(p.gain_loss)}">${p.gain_loss != null ? (p.gain_loss >= 0 ? '+' : '') + fmtCurrency(p.gain_loss) : '—'}</td>
+          <td>${gainPct}</td>
+        </tr>`;
+      }).join('');
+
+      wrap.classList.remove('hidden');
+    } catch (e) {
+      loading.classList.add('hidden');
+      error.textContent = e.message;
+      error.classList.remove('hidden');
+    }
+  }
+
+  // ─── Collapse ─────────────────────────────────────────────────
+
+  function toggleSection(id) {
+    document.getElementById(id).classList.toggle('collapsed');
+    document.querySelector(`[data-toggle="${id}"]`).classList.toggle('collapsed');
+  }
+
+  // ─── Fidelity Realized Gains Upload ──────────────────────────
+
+  async function fidelityUploadRG() {
+    const input = document.getElementById('fidelity-rg-file');
+    if (!input.files.length) { toast('Select a CSV file first.', true); return; }
+    const form = new FormData();
+    form.append('file', input.files[0]);
+    try {
+      const r = await apiFetch('/fidelity/upload/realized-gains', { method: 'POST', body: form });
+      toast(`Realized gains: imported ${r.imported} rows.`);
+      input.value = '';
+      loadTransactions();
+    } catch (e) { toast(e.message, true); }
+  }
+
+  async function fidelityUploadDividends() {
+    const input = document.getElementById('fidelity-div-file');
+    if (!input.files.length) { toast('Select a CSV file first.', true); return; }
+    const form = new FormData();
+    form.append('file', input.files[0]);
+    try {
+      const r = await apiFetch('/fidelity/upload/dividends', { method: 'POST', body: form });
+      toast(`Dividends: imported ${r.imported} rows.`);
+      input.value = '';
+      loadTransactions();
+    } catch (e) { toast(e.message, true); }
+  }
+
+  // ─── Transactions ─────────────────────────────────────────────
+
+  async function loadTransactions() {
+    const loading = document.getElementById('txn-loading');
+    const empty   = document.getElementById('txn-empty');
+    const error   = document.getElementById('txn-error');
+    const wrap    = document.getElementById('txn-table-wrap');
+    const summary = document.getElementById('txn-summary-bar');
+
+    loading.classList.remove('hidden');
+    empty.classList.add('hidden');
+    error.classList.add('hidden');
+    wrap.classList.add('hidden');
+    summary.classList.add('hidden');
+
+    try {
+      const txns = await apiFetch('/transactions');
+      loading.classList.add('hidden');
+
+      const errors = txns.filter(t => t.error);
+      const valid  = txns.filter(t => !t.error);
+
+      if (errors.length) {
+        error.textContent = errors.map(e => `${e.source}: ${e.error}`).join('; ');
+        error.classList.remove('hidden');
+        if (errors.some(e => e.reconnect)) loadStatus();
+      }
+
+      if (!valid.length) { empty.classList.remove('hidden'); return; }
+
+      const SELL_TYPES  = ['sell', 'sold'];
+      const DIV_TYPES   = ['dividend', 'div reinvest', 'interest', 'capital gain', 'return of capital'];
+      const totalRealized = valid
+        .filter(t => SELL_TYPES.some(s => (t.transaction_type||'').includes(s)) || t.realized_gain != null)
+        .reduce((s, t) => s + (t.realized_gain ?? 0), 0);
+      const totalDividends = valid
+        .filter(t => DIV_TYPES.some(d => (t.transaction_type||'').includes(d)))
+        .reduce((s, t) => s + (t.amount || 0), 0);
+
+      const realizedEl = document.getElementById('txn-sum-realized');
+      realizedEl.textContent = (totalRealized >= 0 ? '+' : '') + fmtCurrency(totalRealized);
+      realizedEl.className = 'ml-2 font-bold ' + gainClass(totalRealized);
+      document.getElementById('txn-sum-dividends').textContent = fmtCurrency(totalDividends);
+      summary.classList.remove('hidden');
+
+      const tbody = document.getElementById('txn-tbody');
+      const sorted = [...valid].sort((a, b) => (b.transaction_date || '').localeCompare(a.transaction_date || ''));
+      tbody.innerHTML = sorted.map(t => {
+        const src = t.source === 'etrade'
+          ? `<span class="badge-etrade text-xs px-1.5 py-0.5 rounded">E*Trade</span>`
+          : `<span class="badge-fidelity text-xs px-1.5 py-0.5 rounded">Fidelity</span>`;
+        const typeLabel = (t.transaction_type || '—').replace(/\b\w/g, c => c.toUpperCase());
+        const gain = t.realized_gain != null
+          ? `<span class="${gainClass(t.realized_gain)}">${t.realized_gain >= 0 ? '+' : ''}${fmtCurrency(t.realized_gain)}</span>`
+          : '—';
+        return `<tr>
+          <td>${t.transaction_date || '—'}</td>
+          <td>${src}</td>
+          <td class="text-slate-300">${typeLabel}</td>
+          <td class="text-white font-medium">${t.symbol || '—'}</td>
+          <td class="text-slate-400 text-xs">${t.description || '—'}</td>
+          <td>${t.quantity != null ? fmt(t.quantity, 3) : '—'}</td>
+          <td>${t.price != null ? fmtCurrency(t.price) : '—'}</td>
+          <td class="${gainClass(t.amount)}">${t.amount != null ? fmtCurrency(t.amount) : '—'}</td>
+          <td>${gain}</td>
+        </tr>`;
+      }).join('');
+      wrap.classList.remove('hidden');
+    } catch (e) {
+      loading.classList.add('hidden');
+      error.textContent = e.message;
+      error.classList.remove('hidden');
+    }
+  }
+
+  // ─── Bootstrap ───────────────────────────────────────────────────────────
+
+  sb.auth.onAuthStateChange((_event, session) => {
+    if (session) showApp(session);
+    else showLogin();
+  });
+
+  // Clear auth error on typing
+  ['auth-email', 'auth-password'].forEach(id =>
+    document.getElementById(id).addEventListener('input', () =>
+      document.getElementById('auth-error').classList.add('hidden')
+    )
+  );
+</script>
+</body>
+</html>
