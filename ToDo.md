@@ -4,7 +4,7 @@
 
 - [ ] Verify ETrade cost basis mapping — the API returns it but confirm it's being passed through correctly in `etrade.py` `get_positions()`
 - [ ] Fix performance chart accuracy — currently uses current quantity × historical price, which is wrong if trades occurred during the period. Proper fix: snapshot positions to DB on each load and reconstruct historical value from snapshots
-- [ ] Short vs long-term gain split — determine hold period per realized gain (>1 year = long-term, lower tax rate) and surface it in the Transactions table and Realized vs Unrealized chart
+- [x] Short vs long-term gain split — LT/ST badges in the Transactions table + ST/LT split in the Evaluate tab's Tax Estimate card (2026-07, Evaluate suite)
 
 ## 2. Notes per Position
 
@@ -44,25 +44,26 @@ Notify the user when a symbol crosses a price threshold they set.
 
 ## 5. Analytics Depth
 
-### Sector Breakdown Chart
-- Backend endpoint `/analytics/sectors` already exists but has no chart
-- Add a donut or horizontal bar chart to the Analytics section showing allocation by GICS sector
-- Click a sector to filter the Positions table to that sector
+### Sector Breakdown Chart — DONE (2026-07, Evaluate suite)
+- [x] Donut chart on the Evaluate tab fetching `/analytics/sectors`
+- [ ] Stretch remaining: click a sector to filter the Positions table to that sector
 
-### Tax Estimate
-- Use realized gains already in the DB + short/long-term split (see item 1)
-- Show estimated federal cap gains tax for the current year (use standard 0/15/20% long-term brackets)
-- Display as a card in the Analytics section — not financial advice, just an estimate
+### Tax Estimate — DONE (2026-07, Evaluate suite)
+- [x] Card on the Evaluate tab: current-year realized gains split ST/LT, est. tax at 22%/15%
+- [ ] Stretch remaining: use actual 0/15/20% LT brackets based on income input instead of flat 15%
 
 ### Dividend Calendar
 - Show projected monthly dividend income based on current holdings + historical dividend frequency from yfinance
 - Highlight months with no dividend income
 - Show projected annual total
 
-### Beta / Volatility
-- Fetch beta from `yf.Ticker(symbol).info["beta"]` for each holding
-- Compute weighted portfolio beta (sum of weight × beta)
-- Add to Analytics: portfolio beta card + per-position beta column in Positions table (toggleable)
+### Beta / Volatility — DONE (2026-07, Evaluate suite)
+- [x] `/analytics/beta` endpoint + Portfolio Beta card on the Evaluate tab (weighted beta, top-3 highest-beta holdings)
+- [ ] Stretch remaining: per-position beta column in the Positions table
+
+## 9. Chat session cleanup
+
+The Claude Agent SDK persists chat sessions on disk (harmless for personal use). Occasionally clear old ones; also `_chat_sessions` in `main.py` is in-memory, so chats don't survive a server restart.
 
 ## 6. Dark / Light Mode Toggle
 

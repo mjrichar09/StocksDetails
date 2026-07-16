@@ -8,3 +8,4 @@ yfinance
 matplotlib
 pandas
 requests
+claude-agent-sdk

@@ -3,9 +3,10 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from pathlib import Path
+import json
 import re
 import time
 
@@ -17,6 +18,7 @@ import os
 
 from db import get_supabase, verify_jwt
 from cpi import ensure_cpi, cpi_at
+from chat import stream_chat
 from etrade import start_oauth, complete_oauth, get_positions as etrade_positions, get_transactions as etrade_transactions
 from fidelity import parse_fidelity_csv, parse_fidelity_realized_gains, parse_fidelity_dividends
 
@@ -639,6 +641,73 @@ def _compute_beta(user_id: str):
         return {"portfolio_beta": portfolio_beta, "holdings": holdings}
     except Exception:
         return {"portfolio_beta": None, "holdings": []}
+
+
+# ─── AI chat ──────────────────────────────────────────────────────────────────
+
+# user_id -> {session_id: snapshot_json}. In-memory: sessions die with the
+# process, which is fine for a single-user local tool.
+_chat_sessions: dict[str, dict[str, str]] = {}
+
+
+class ChatBody(BaseModel):
+    message: str
+    session_id: str | None = None
+
+
+def _build_chat_context(user_id: str) -> str:
+    """Compact portfolio snapshot injected into the chat system prompt."""
+    db = get_supabase()
+    positions = _gather_positions(user_id, db)
+    real = _cached(f"realreturns:{user_id}", 3600, lambda: _compute_real_returns(user_id))
+    sectors = _cached(f"sectors:{user_id}", 86400, lambda: _compute_sectors(user_id))
+    beta = _cached(f"beta:{user_id}", 86400, lambda: _compute_beta(user_id))
+
+    rg = db.table("fidelity_realized_gains").select("symbol,realized_gain") \
+        .eq("user_id", user_id).execute()
+    realized_by: dict[str, float] = {}
+    for r in rg.data:
+        realized_by[r["symbol"]] = round(realized_by.get(r["symbol"], 0) + (r.get("realized_gain") or 0), 2)
+
+    div = db.table("fidelity_dividends").select("amount").eq("user_id", user_id).execute()
+    total_dividends = round(sum(r.get("amount") or 0 for r in div.data), 2)
+
+    snapshot = {
+        "as_of": real.get("as_of"),
+        "positions": [
+            {"symbol": s, "market_value": round(v["market_value"], 2),
+             "cost_basis": round(v["cost_basis"], 2),
+             "unrealized_gain": round(v["market_value"] - v["cost_basis"], 2)}
+            for s, v in positions.items()
+        ],
+        "real_returns": real,
+        "sectors": sectors,
+        "portfolio_beta": beta.get("portfolio_beta"),
+        "realized_gain_by_symbol": realized_by,
+        "total_dividends_received": total_dividends,
+    }
+    return json.dumps(snapshot, separators=(",", ":"))
+
+
+@app.post("/chat")
+async def chat_endpoint(body: ChatBody, user_id: str = Depends(current_user)):
+    """Portfolio chat via the Claude Agent SDK. Streams SSE events:
+    {"text": ...} chunks then {"done": true, "session_id": ...}."""
+    if body.session_id:
+        context = _chat_sessions.get(user_id, {}).get(body.session_id)
+        if context is None:
+            raise HTTPException(status_code=403, detail="Unknown chat session")
+    else:
+        context = _build_chat_context(user_id)
+
+    async def gen():
+        async for evt in stream_chat(body.message, body.session_id, context):
+            if evt.get("done") and evt.get("session_id"):
+                _chat_sessions.setdefault(user_id, {})[evt["session_id"]] = context
+            yield f"data: {json.dumps(evt)}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/status")

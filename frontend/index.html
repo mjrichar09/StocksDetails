@@ -82,6 +82,7 @@
       </div>
     </div>
     <div class="flex items-center gap-3">
+      <button class="btn-secondary text-sm" onclick="toggleChat()">💬 Ask Claude</button>
       <span id="user-email" class="text-slate-400 text-sm"></span>
       <button class="btn-secondary text-sm" onclick="signOut()">Sign out</button>
     </div>
@@ -343,6 +344,26 @@
 </div>
 
 <div id="toast"></div>
+
+<!-- Chat slide-over (available from both tabs) -->
+<div id="chat-panel" class="fixed top-0 right-0 h-full w-full max-w-md z-50 flex flex-col translate-x-full transition-transform duration-300"
+     style="background:#151a23;border-left:1px solid #334155">
+  <div class="flex items-center justify-between p-4" style="border-bottom:1px solid #334155">
+    <h2 class="font-semibold text-white">Ask Claude</h2>
+    <div class="flex items-center gap-2">
+      <button class="btn-secondary text-xs" onclick="newChat()" title="Start over with a fresh portfolio snapshot">New chat</button>
+      <button class="chevron" onclick="toggleChat()" style="transform:none">✕</button>
+    </div>
+  </div>
+  <div id="chat-messages" class="flex-1 overflow-y-auto p-4 space-y-3 text-sm">
+    <div class="text-slate-500 text-xs">Ask about your portfolio — e.g. “Which of my holdings is lagging a savings account?” A data snapshot is taken when the chat starts; use New chat to refresh it. Educational analysis, not financial advice.</div>
+  </div>
+  <div class="p-3 flex gap-2" style="border-top:1px solid #334155">
+    <textarea id="chat-input" rows="2" placeholder="Ask about your portfolio…" class="flex-1"
+              style="background:#0f1117;border:1px solid #334155;color:#e2e8f0;border-radius:6px;padding:8px 12px;outline:none;resize:none"></textarea>
+    <button id="chat-send" class="btn-primary text-sm self-end" onclick="sendChat()">Send</button>
+  </div>
+</div>
 
 <script>
   // ─── Config ──────────────────────────────────────────────────────────────
@@ -1278,6 +1299,101 @@
     else renderEvaluate();
   }
 
+  // ─── Chat ─────────────────────────────────────────────────────────────────
+
+  let _chatSessionId = null;
+  let _chatBusy = false;
+
+  function toggleChat() {
+    document.getElementById('chat-panel').classList.toggle('translate-x-full');
+  }
+
+  function newChat() {
+    _chatSessionId = null;
+    document.getElementById('chat-messages').innerHTML =
+      '<div class="text-slate-500 text-xs">New chat — a fresh portfolio snapshot will be taken with your first message.</div>';
+  }
+
+  function chatBubble(role, text) {
+    const div = document.createElement('div');
+    if (role === 'user') {
+      div.className = 'rounded-lg px-3 py-2 ml-8 whitespace-pre-wrap';
+      div.style.background = '#1e3a5f';
+    } else {
+      div.className = 'rounded-lg px-3 py-2 mr-4 whitespace-pre-wrap text-slate-200';
+      div.style.background = '#1e293b';
+    }
+    div.textContent = text;
+    const msgs = document.getElementById('chat-messages');
+    msgs.appendChild(div);
+    msgs.scrollTop = msgs.scrollHeight;
+    return div;
+  }
+
+  async function sendChat() {
+    if (_chatBusy) return;
+    const input = document.getElementById('chat-input');
+    const message = input.value.trim();
+    if (!message) return;
+    input.value = '';
+    _chatBusy = true;
+    const sendBtn = document.getElementById('chat-send');
+    sendBtn.disabled = true;
+    sendBtn.textContent = '…';
+
+    chatBubble('user', message);
+    const bubble = chatBubble('assistant', 'Thinking…');
+    const msgs = document.getElementById('chat-messages');
+
+    try {
+      const { data: { session } } = await sb.auth.getSession();
+      if (!session) throw new Error('Not authenticated');
+      const res = await fetch(API_BASE + '/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ message, session_id: _chatSessionId }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${res.status}`);
+      }
+
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '', text = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const events = buf.split('\n\n');
+        buf = events.pop();
+        for (const line of events) {
+          if (!line.startsWith('data: ')) continue;
+          const evt = JSON.parse(line.slice(6));
+          if (evt.text) {
+            text += evt.text;
+            bubble.textContent = text;
+            msgs.scrollTop = msgs.scrollHeight;
+          }
+          if (evt.error) {
+            bubble.textContent = evt.error;
+            bubble.classList.add('text-red-400');
+            text = text || evt.error;
+          }
+          if (evt.done && evt.session_id) _chatSessionId = evt.session_id;
+        }
+      }
+      if (!text) bubble.textContent = '(no response — is Claude Code logged in on this machine?)';
+    } catch (e) {
+      bubble.textContent = 'Error: ' + e.message;
+      bubble.classList.add('text-red-400');
+    } finally {
+      _chatBusy = false;
+      sendBtn.disabled = false;
+      sendBtn.textContent = 'Send';
+    }
+  }
+
   // ─── Bootstrap ───────────────────────────────────────────────────────────
 
   sb.auth.onAuthStateChange((_event, session) => {
@@ -1291,6 +1407,11 @@
       document.getElementById('auth-error').classList.add('hidden')
     )
   );
+
+  // Enter sends chat (Shift+Enter for newline)
+  document.getElementById('chat-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+  });
 </script>
 </body>
 </html>

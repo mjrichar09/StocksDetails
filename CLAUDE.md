@@ -4,12 +4,21 @@ Portfolio tracker that imports holdings from E*Trade (via OAuth) and Fidelity (v
 
 ## Start the app
 
+Windows (local, venv at repo root — created 2026-07):
+
+```powershell
+cd C:\Users\markyjas\Repositories\StocksDetails\backend
+..\.venv\Scripts\python -m uvicorn main:app --reload --port 8000
+```
+
+Codespaces:
+
 ```bash
 cd /workspaces/StocksDetails/backend
 uvicorn main:app --reload --port 8000
 ```
 
-Access at the Codespaces forwarded URL for port 8000 (make port Public in the Ports tab).
+Access at the Codespaces forwarded URL for port 8000 (make port Public in the Ports tab). **The AI chat feature only works locally** — it rides the machine's Claude Code login.
 
 ## Stack
 
@@ -25,7 +34,11 @@ ETRADE_CONSUMER_KEY=
 ETRADE_CONSUMER_SECRET=
 SUPABASE_URL=
 SUPABASE_SERVICE_KEY=   # service-role key, server-side only
+HYSA_APY=0.045          # optional — cash benchmark for /analytics/real-returns
+BLS_API_KEY=            # optional — registered BLS v2 API (keyless v1 used otherwise)
 ```
+
+**Never set `ANTHROPIC_API_KEY` here** — the chat feature uses Claude Code subscription auth, and a set key would silently switch it to pay-per-token API billing (`chat.py` scrubs it defensively).
 
 The frontend hardcodes `SUPABASE_URL` and `SUPABASE_ANON_KEY` directly in `index.html` (lines ~179-180).
 
@@ -39,6 +52,8 @@ Run `schema.sql` in the Supabase SQL editor to create all tables. All tables hav
 | `fidelity_positions` | CSV positions snapshot, replaced on each upload |
 | `fidelity_realized_gains` | Realized gain/loss CSV, **merged** on upload (deduped on `user_id, symbol, date_sold, proceeds`) |
 | `fidelity_dividends` | Dividend/income history CSV, **merged** on upload (deduped on `user_id, symbol, run_date, amount`) |
+| `position_acquisitions` | Purchase date per (user, symbol) — `source` is `manual` or `etrade_inferred`; manual wins |
+| `cpi_monthly` | Global BLS CPI series (no per-user rows; RLS with no policies = service-role only) |
 
 E*Trade transactions are fetched live from the API (not stored).
 
@@ -62,6 +77,13 @@ E*Trade transactions are fetched live from the API (not stored).
 | `GET /analytics/sectors` | Holdings grouped by GICS sector via yfinance |
 | `GET /analytics/sparkline?symbol=X` | 30-day price history for hover popup |
 | `GET /analytics/exchange?symbol=X` | Resolves Google Finance URL with exchange suffix |
+| `GET /analytics/real-returns` | Per-holding annualized return vs CPI/SPY/HYSA; dateless holdings in `needs_date` |
+| `GET /analytics/beta` | Weighted portfolio beta via yfinance |
+| `GET/PUT /acquisitions[/{symbol}]` | Read/set purchase dates |
+| `POST /acquisitions/infer` | Infer dates from E*Trade buy history (never overwrites manual) |
+| `POST /chat` | AI portfolio chat (SSE stream; Claude Agent SDK, local-only) |
+
+All yfinance-backed endpoints go through `_cached(key, ttl, fn)` (in-memory TTL cache in `main.py`), invalidated per-user via `_invalidate_user_cache` when holdings change.
 
 **Token expiry handling**: when ETrade returns 401, the backend auto-deletes the stale tokens and returns `{"error": "...", "reconnect": true}`. The frontend sees this flag, calls `loadStatus()`, and shows the "Connect E*Trade" button.
 
@@ -83,9 +105,19 @@ All parsers use dynamic header detection (search for key column names) to handle
 
 `get_supabase()` returns a service-role Supabase client. `verify_jwt(token)` validates user JWTs.
 
+### `backend/cpi.py`
+
+BLS CPI fetch (series `CUUR0000SA0`) stored in `cpi_monthly`. `ensure_cpi(db)` refreshes at most ~monthly (throttled by `fetched_at` — CPI publishes ~6 weeks late); `cpi_at(series, date)` does nearest-earlier-month lookup. FRED fallback documented in the module docstring.
+
+### `backend/chat.py`
+
+Claude Agent SDK glue: `stream_chat(message, session_id, context)` yields `{"text": ...}` chunks then `{"done": True, "session_id"}`. Tool-less agent (`allowed_tools=[]`, `max_turns=1`), runs in a temp cwd, env scrubbed of `ANTHROPIC_API_KEY`. The portfolio snapshot is re-sent as system prompt every turn (kept per-session in `main.py`'s `_chat_sessions`), so resumed turns keep the original snapshot.
+
 ## Frontend — `frontend/index.html`
 
-Single HTML file, all JS inline. Key globals:
+Single HTML file, all JS inline. **Two client-side tabs** (`setTab()`): **Dashboard** (broker cards, positions, transactions, the 6 quick charts) and **Evaluate** (Real Returns vs Benchmarks with inline needs-date entry, Realized vs Unrealized by Symbol, Sector donut, Dividend Yield on Cost, Portfolio Beta, Tax Estimate). Only the visible tab's charts render (ApexCharts sizes to 0 in hidden containers); `setTab` re-renders on switch. **Chat slide-over** (`toggleChat()`) is available from both tabs and streams `/chat` via `fetch` + `ReadableStream` (not `EventSource` — it can't send the Authorization header).
+
+Key globals:
 
 | Global | Set by | Used by |
 |---|---|---|
@@ -166,6 +198,8 @@ See **[ToDo.md](./ToDo.md)** for the full backlog with implementation notes.
 
 ## Known issues / future work
 
+- AI chat is local-only (needs Claude Code logged in on the machine running the backend); chat sessions don't survive a server restart (`_chat_sessions` is in-memory)
+- Real-returns uses one date per position — DCA'd positions get approximate annualized returns; E*Trade inference sees ~2yr/250 txns so the earliest visible buy may not be the true first lot
 - `analysis/` directory (`portfolio_history.py`, `portfolio_history.png`) is not committed — gitignore patterns may have line-ending issues
 - ETrade live 401s on reconnect: the backend deletes tokens and flags `reconnect: true`, but the user must go through full OAuth again (ETrade tokens expire daily)
 - Performance chart uses current quantity × historical price (approximation — doesn't account for trades made during the period)
