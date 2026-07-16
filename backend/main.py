@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from pathlib import Path
 import re
+import time
 
 import yfinance as yf
 import pandas as pd
@@ -78,12 +79,14 @@ def etrade_verify(body: VerifyBody, user_id: str = Depends(current_user)):
         on_conflict="user_id",
     ).execute()
 
+    _invalidate_user_cache(user_id)
     return {"status": "connected"}
 
 
 @app.delete("/auth/etrade/disconnect")
 def etrade_disconnect(user_id: str = Depends(current_user)):
     get_supabase().table("etrade_connections").delete().eq("user_id", user_id).execute()
+    _invalidate_user_cache(user_id)
     return {"status": "disconnected"}
 
 
@@ -105,6 +108,7 @@ async def fidelity_upload(
         [{**p, "user_id": user_id} for p in positions]
     ).execute()
 
+    _invalidate_user_cache(user_id)
     return {"status": "ok", "imported": len(positions)}
 
 
@@ -181,6 +185,7 @@ def get_all_transactions(user_id: str = Depends(current_user)):
             "description":      r.get("description"),
             "quantity":         r.get("quantity"),
             "transaction_date": r.get("date_sold"),
+            "date_acquired":    r.get("date_acquired"),
             "amount":           r.get("proceeds"),
             "cost_basis":       r.get("cost_basis"),
             "realized_gain":    r.get("realized_gain"),
@@ -239,6 +244,26 @@ async def fidelity_upload_dividends(
 
 _CASH_RE = re.compile(r"^(SPAXX|FCASH|FDRXX|FZFXX|VMFXX|\*\*|\d+).*", re.IGNORECASE)
 
+# Simple in-memory TTL cache for yfinance-backed endpoints (one process, personal use)
+_cache: dict[str, tuple[float, object]] = {}
+
+
+def _cached(key: str, ttl: int, fn):
+    now = time.time()
+    hit = _cache.get(key)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    val = fn()
+    _cache[key] = (now, val)
+    return val
+
+
+def _invalidate_user_cache(user_id: str):
+    """Drop cached analytics for a user after their holdings change."""
+    for k in list(_cache):
+        if f":{user_id}" in k:
+            del _cache[k]
+
 
 def _gather_positions(user_id: str, db):
     """Return merged {symbol: {"quantity": float, "market_value": float, "cost_basis": float}} dict."""
@@ -274,6 +299,10 @@ def _gather_positions(user_id: str, db):
 @app.get("/analytics/performance")
 def analytics_performance(days: int = Query(365, ge=1, le=730), user_id: str = Depends(current_user)):
     """Portfolio value over time using yfinance historical prices."""
+    return _cached(f"performance:{user_id}:{days}", 3600, lambda: _compute_performance(user_id, days))
+
+
+def _compute_performance(user_id: str, days: int):
     try:
         db = get_supabase()
         positions = _gather_positions(user_id, db)
@@ -306,6 +335,10 @@ def analytics_performance(days: int = Query(365, ge=1, le=730), user_id: str = D
 @app.get("/analytics/sectors")
 def analytics_sectors(user_id: str = Depends(current_user)):
     """Portfolio allocation by GICS sector via yfinance."""
+    return _cached(f"sectors:{user_id}", 86400, lambda: _compute_sectors(user_id))
+
+
+def _compute_sectors(user_id: str):
     try:
         db = get_supabase()
         positions = _gather_positions(user_id, db)
@@ -338,6 +371,10 @@ def analytics_sectors(user_id: str = Depends(current_user)):
 @app.get("/analytics/sparkline")
 def analytics_sparkline(symbol: str = Query(...), user_id: str = Depends(current_user)):
     """Return 30-day daily close prices for a symbol."""
+    return _cached(f"sparkline:{symbol}", 3600, lambda: _compute_sparkline(symbol))
+
+
+def _compute_sparkline(symbol: str):
     try:
         hist = yf.download(symbol, period="30d", interval="1d", auto_adjust=True, progress=False)["Close"]
         if hasattr(hist, "squeeze"):
@@ -367,6 +404,10 @@ _GF_EXCHANGE: dict[str, str] = {
 @app.get("/analytics/exchange")
 def analytics_exchange(symbol: str = Query(...), user_id: str = Depends(current_user)):
     """Return the Google Finance URL for a symbol by resolving its exchange via yfinance."""
+    return _cached(f"exchange:{symbol}", 86400, lambda: _compute_exchange(symbol))
+
+
+def _compute_exchange(symbol: str):
     try:
         info = yf.Ticker(symbol).fast_info
         raw = getattr(info, "exchange", None) or ""

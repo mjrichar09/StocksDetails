@@ -40,6 +40,8 @@
     tr:hover td { background: #1e293b; }
     .gain  { color: #4ade80; }
     .loss  { color: #f87171; }
+    .badge-lt { background: #1a3a2a; color: #4ade80; }
+    .badge-st { background: #3a2a1a; color: #fb923c; }
     #toast { display:none; position:fixed; bottom:24px; right:24px; background:#1e293b; border:1px solid #334155;
              color:#e2e8f0; padding:12px 20px; border-radius:8px; font-size:13px; z-index:999; }
     .analytics-card { opacity: 0; animation: slideUp 0.5s ease forwards; }
@@ -71,13 +73,22 @@
 <div id="app-screen" class="hidden max-w-6xl mx-auto px-4 py-8 space-y-6">
 
   <!-- Header -->
-  <div class="flex items-center justify-between">
-    <h1 class="text-xl font-bold text-white">StocksDetails</h1>
+  <div class="flex items-center justify-between flex-wrap gap-3">
+    <div class="flex items-center gap-6">
+      <h1 class="text-xl font-bold text-white">StocksDetails</h1>
+      <div class="flex gap-1">
+        <button id="tab-btn-dashboard" class="btn-primary text-sm" onclick="setTab('dashboard')">Dashboard</button>
+        <button id="tab-btn-evaluate" class="btn-secondary text-sm" onclick="setTab('evaluate')">Evaluate</button>
+      </div>
+    </div>
     <div class="flex items-center gap-3">
       <span id="user-email" class="text-slate-400 text-sm"></span>
       <button class="btn-secondary text-sm" onclick="signOut()">Sign out</button>
     </div>
   </div>
+
+  <!-- ═══ Dashboard tab ═══ -->
+  <div id="tab-dashboard" class="space-y-6">
 
   <!-- Broker connections -->
   <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -271,6 +282,45 @@
     </div>
   </div>
 
+  </div><!-- /tab-dashboard -->
+
+  <!-- ═══ Evaluate tab ═══ -->
+  <div id="tab-evaluate" class="hidden space-y-6">
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4" id="evaluate-grid">
+
+      <!-- Realized vs Unrealized by Symbol (full width) -->
+      <div class="card p-4 analytics-card md:col-span-2" style="animation-delay:0s">
+        <h3 class="text-sm font-semibold text-slate-300 mb-1">Realized vs Unrealized by Symbol</h3>
+        <p class="text-slate-500 text-xs mb-3">Which holdings have produced actual (realized) gains vs paper gains — top movers by combined impact.</p>
+        <div id="chart-realized-symbol-empty" class="hidden text-slate-500 text-sm py-8 text-center">No position or realized-gain data yet.</div>
+        <div id="chart-realized-symbol" style="height:360px"></div>
+      </div>
+
+      <!-- Sector Breakdown -->
+      <div class="card p-4 analytics-card" style="animation-delay:0.1s">
+        <h3 class="text-sm font-semibold text-slate-300 mb-3">Sector Breakdown</h3>
+        <div id="chart-sectors-loading" class="text-slate-400 text-sm py-8 text-center">Fetching sector data…</div>
+        <div id="chart-sectors" style="height:280px"></div>
+      </div>
+
+      <!-- Dividend Yield on Cost -->
+      <div class="card p-4 analytics-card" style="animation-delay:0.2s">
+        <h3 class="text-sm font-semibold text-slate-300 mb-1">Dividend Yield on Cost</h3>
+        <p class="text-slate-500 text-xs mb-3">Trailing 12-month dividends ÷ your cost basis, per holding.</p>
+        <div id="chart-yield-empty" class="hidden text-slate-500 text-sm py-8 text-center">No dividend data in the last 12 months.</div>
+        <div id="chart-yield" style="height:280px"></div>
+      </div>
+
+      <!-- Tax Estimate (full width) -->
+      <div class="card p-4 analytics-card md:col-span-2" style="animation-delay:0.3s">
+        <h3 class="text-sm font-semibold text-slate-300 mb-1">Tax Estimate — Current-Year Realized Gains</h3>
+        <p class="text-slate-500 text-xs mb-3">Rough estimate assuming 15% long-term and 22% short-term rates. Not tax advice.</p>
+        <div id="tax-estimate-body" class="text-sm"></div>
+      </div>
+
+    </div>
+  </div><!-- /tab-evaluate -->
+
 </div>
 
 <div id="toast"></div>
@@ -348,6 +398,19 @@
     const el = document.getElementById('auth-error');
     el.textContent = msg;
     el.classList.remove('hidden');
+  }
+
+  // ─── Tabs ─────────────────────────────────────────────────────────────────
+
+  let _activeTab = 'dashboard';
+
+  function setTab(name) {
+    _activeTab = name;
+    document.getElementById('tab-dashboard').classList.toggle('hidden', name !== 'dashboard');
+    document.getElementById('tab-evaluate').classList.toggle('hidden', name !== 'evaluate');
+    document.getElementById('tab-btn-dashboard').className = (name === 'dashboard' ? 'btn-primary' : 'btn-secondary') + ' text-sm';
+    document.getElementById('tab-btn-evaluate').className  = (name === 'evaluate'  ? 'btn-primary' : 'btn-secondary') + ' text-sm';
+    renderAnalytics();
   }
 
   // ─── Screen switching ─────────────────────────────────────────────────────
@@ -478,6 +541,7 @@
   // ─── Positions ────────────────────────────────────────────────────────────
 
   async function loadPositions() {
+    window._sectorsData = null;  // sectors derive from positions — refetch after reload
     const loading = document.getElementById('positions-loading');
     const empty   = document.getElementById('positions-empty');
     const error   = document.getElementById('positions-error');
@@ -648,7 +712,7 @@
         return `<tr>
           <td>${t.transaction_date || '—'}</td>
           <td>${src}</td>
-          <td class="text-slate-300">${typeLabel}</td>
+          <td class="text-slate-300">${typeLabel}${holdBadge(t)}</td>
           <td class="text-white font-medium">${t.symbol || '—'}</td>
           <td class="text-slate-400 text-xs">${t.description || '—'}</td>
           <td>${t.quantity != null ? fmt(t.quantity, 3) : '—'}</td>
@@ -883,7 +947,186 @@
     _charts['concentration'].render();
   }
 
-  function renderAnalytics() {
+  // ─── Evaluate tab ─────────────────────────────────────────────────────────
+
+  // Long-term vs short-term hold badge for realized-gain rows (needs both dates)
+  function holdBadge(t) {
+    if (t.realized_gain == null || !t.date_acquired || !t.transaction_date) return '';
+    const acquired = new Date(t.date_acquired), sold = new Date(t.transaction_date);
+    if (isNaN(acquired) || isNaN(sold)) return '';
+    return (sold - acquired) / 86400000 > 365
+      ? ' <span class="badge-lt text-xs px-1 py-0.5 rounded" title="Held over 1 year — long-term">LT</span>'
+      : ' <span class="badge-st text-xs px-1 py-0.5 rounded" title="Held 1 year or less — short-term">ST</span>';
+  }
+
+  function renderRealizedBySymbol() {
+    const positions = window._positions || [];
+    const txns = window._transactions || [];
+    const by = {};
+    positions.forEach(p => {
+      if (!p.symbol) return;
+      by[p.symbol] = by[p.symbol] || { u: 0, r: 0 };
+      by[p.symbol].u += p.gain_loss || 0;
+    });
+    txns.forEach(t => {
+      if (!t.symbol || t.realized_gain == null) return;
+      by[t.symbol] = by[t.symbol] || { u: 0, r: 0 };
+      by[t.symbol].r += t.realized_gain;
+    });
+
+    const emptyEl = document.getElementById('chart-realized-symbol-empty');
+    const rows = Object.entries(by)
+      .map(([symbol, v]) => ({ symbol, u: v.u, r: v.r }))
+      .filter(x => x.u !== 0 || x.r !== 0)
+      .sort((a, b) => (Math.abs(b.u) + Math.abs(b.r)) - (Math.abs(a.u) + Math.abs(a.r)))
+      .slice(0, 12);
+    if (!rows.length) { emptyEl.classList.remove('hidden'); destroyChart('realized-symbol'); return; }
+    emptyEl.classList.add('hidden');
+
+    destroyChart('realized-symbol');
+    _charts['realized-symbol'] = new ApexCharts(document.getElementById('chart-realized-symbol'), {
+      ...BASE_CHART,
+      chart: { ...BASE_CHART.chart, type: 'bar', height: 360 },
+      plotOptions: { bar: { horizontal: true, borderRadius: 2, barHeight: '75%' } },
+      series: [
+        { name: 'Unrealized (paper)', data: rows.map(x => parseFloat(x.u.toFixed(2))) },
+        { name: 'Realized',           data: rows.map(x => parseFloat(x.r.toFixed(2))) },
+      ],
+      xaxis: { categories: rows.map(x => x.symbol), labels: { formatter: v => '$' + (Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + 'K' : Number(v).toFixed(0)) } },
+      colors: ['#38bdf8', '#4ade80'],
+      legend: { position: 'top' },
+      tooltip: { y: { formatter: v => (v >= 0 ? '+' : '') + '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2 }) } },
+    });
+    _charts['realized-symbol'].render();
+  }
+
+  async function renderSectors() {
+    const loadingEl = document.getElementById('chart-sectors-loading');
+    try {
+      if (!window._sectorsData) {
+        loadingEl.textContent = 'Fetching sector data…';
+        loadingEl.classList.remove('hidden');
+        window._sectorsData = await apiFetch('/analytics/sectors');
+      }
+      const data = window._sectorsData;
+      if (!data.length) { loadingEl.textContent = 'No sector data available.'; loadingEl.classList.remove('hidden'); return; }
+      loadingEl.classList.add('hidden');
+
+      destroyChart('sectors');
+      _charts['sectors'] = new ApexCharts(document.getElementById('chart-sectors'), {
+        ...BASE_CHART,
+        chart: { ...BASE_CHART.chart, type: 'donut' },
+        series: data.map(s => s.value),
+        labels: data.map(s => s.sector),
+        colors: ['#3b82f6','#4ade80','#fb923c','#a78bfa','#f472b6','#38bdf8','#facc15','#f87171','#94a3b8','#34d399'],
+        legend: { position: 'bottom', fontSize: '12px' },
+        plotOptions: { pie: { donut: { size: '65%' } } },
+        dataLabels: { enabled: true, formatter: val => val.toFixed(1) + '%', style: { fontSize: '11px' } },
+        stroke: { colors: ['#0f1117'], width: 2 },
+        tooltip: { y: { formatter: (v, { seriesIndex }) => '$' + v.toLocaleString('en-US', { maximumFractionDigits: 0 }) + ' — ' + (data[seriesIndex].symbols || []).join(', ') } },
+      });
+      _charts['sectors'].render();
+    } catch (e) {
+      loadingEl.textContent = 'Could not load sector data.';
+      loadingEl.classList.remove('hidden');
+    }
+  }
+
+  function renderYieldOnCost() {
+    const positions = window._positions || [];
+    const txns = window._transactions || [];
+    const DIV_TYPES = ['dividend', 'div reinvest', 'interest', 'capital gain'];
+    const cutoff = Date.now() - 365 * 86400000;
+
+    const divBySym = {};
+    txns.forEach(t => {
+      if (!t.symbol || !t.amount) return;
+      if (!DIV_TYPES.some(d => (t.transaction_type || '').toLowerCase().includes(d))) return;
+      const d = new Date(t.transaction_date);
+      if (isNaN(d) || d.getTime() < cutoff) return;
+      divBySym[t.symbol] = (divBySym[t.symbol] || 0) + t.amount;
+    });
+    const costBySym = {};
+    positions.forEach(p => {
+      if (p.symbol && p.cost_basis > 0) costBySym[p.symbol] = (costBySym[p.symbol] || 0) + p.cost_basis;
+    });
+
+    const emptyEl = document.getElementById('chart-yield-empty');
+    const rows = Object.entries(divBySym)
+      .filter(([sym]) => costBySym[sym] > 0)
+      .map(([sym, div]) => ({ symbol: sym, yld: div / costBySym[sym] * 100, div }))
+      .sort((a, b) => b.yld - a.yld)
+      .slice(0, 12);
+    if (!rows.length) { emptyEl.classList.remove('hidden'); destroyChart('yield'); return; }
+    emptyEl.classList.add('hidden');
+
+    destroyChart('yield');
+    _charts['yield'] = new ApexCharts(document.getElementById('chart-yield'), {
+      ...BASE_CHART,
+      chart: { ...BASE_CHART.chart, type: 'bar' },
+      plotOptions: { bar: { horizontal: true, distributed: true, borderRadius: 3, barHeight: '70%' } },
+      series: [{ name: 'Yield on Cost', data: rows.map(x => parseFloat(x.yld.toFixed(2))) }],
+      xaxis: { categories: rows.map(x => x.symbol), labels: { formatter: v => v + '%' } },
+      colors: rows.map(() => '#a78bfa'),
+      legend: { show: false },
+      dataLabels: { enabled: true, formatter: v => v.toFixed(2) + '%', style: { fontSize: '11px', colors: ['#e2e8f0'] }, offsetX: 4 },
+      tooltip: { y: { formatter: (v, { dataPointIndex }) => v.toFixed(2) + '% ($' + rows[dataPointIndex].div.toFixed(2) + ' TTM)' } },
+    });
+    _charts['yield'].render();
+  }
+
+  const ST_TAX_RATE = 0.22;  // assumed marginal income rate for short-term gains
+  const LT_TAX_RATE = 0.15;  // assumed long-term capital gains rate
+
+  function renderTaxEstimate() {
+    const txns = window._transactions || [];
+    const year = new Date().getFullYear();
+    let st = 0, lt = 0, unknown = 0;
+    txns.forEach(t => {
+      if (t.realized_gain == null || !t.transaction_date) return;
+      const sold = new Date(t.transaction_date);
+      if (isNaN(sold) || sold.getFullYear() !== year) return;
+      const acquired = t.date_acquired ? new Date(t.date_acquired) : null;
+      if (acquired && !isNaN(acquired)) {
+        if ((sold - acquired) / 86400000 > 365) lt += t.realized_gain; else st += t.realized_gain;
+      } else {
+        unknown += t.realized_gain;
+      }
+    });
+
+    const body = document.getElementById('tax-estimate-body');
+    if (st === 0 && lt === 0 && unknown === 0) {
+      body.innerHTML = `<p class="text-slate-500 py-4">No realized gains recorded in ${year} yet.</p>`;
+      return;
+    }
+    // Unknown hold periods are treated as short-term (conservative)
+    const stAll = st + unknown;
+    const stTax = Math.max(stAll, 0) * ST_TAX_RATE;
+    const ltTax = Math.max(lt, 0) * LT_TAX_RATE;
+    const stat = (label, value, cls = 'text-white') =>
+      `<div><div class="text-slate-400 text-xs uppercase tracking-wide mb-1">${label}</div>
+        <div class="font-bold text-lg ${cls}">${value}</div></div>`;
+    const signed = v => (v >= 0 ? '+' : '') + fmtCurrency(v);
+    body.innerHTML = `
+      <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
+        ${stat('Short-term gains ' + year, signed(stAll), gainClass(stAll) || 'text-white')}
+        ${stat('Long-term gains ' + year, signed(lt), gainClass(lt) || 'text-white')}
+        ${stat('Est. tax on ST (' + (ST_TAX_RATE * 100).toFixed(0) + '%)', fmtCurrency(stTax))}
+        ${stat('Est. tax on LT (' + (LT_TAX_RATE * 100).toFixed(0) + '%)', fmtCurrency(ltTax))}
+        ${stat('Est. total tax', fmtCurrency(stTax + ltTax), 'text-orange-400')}
+      </div>
+      ${unknown !== 0 ? `<p class="text-slate-500 text-xs mt-3">${signed(unknown)} of gains have no purchase date on record and were counted as short-term.</p>` : ''}`;
+  }
+
+  function renderEvaluate() {
+    if (!window._positions) return;
+    renderRealizedBySymbol();
+    renderYieldOnCost();
+    renderTaxEstimate();
+    renderSectors();
+  }
+
+  function renderDashboardCharts() {
     if (!window._positions) return;
     renderAllocation();
     renderWinnersLosers();
@@ -891,6 +1134,13 @@
     renderRealized();
     renderConcentration();
     renderPerformance();
+  }
+
+  // Only the visible tab's charts render — ApexCharts sizes to 0 in hidden containers.
+  // setTab() re-renders on every switch, so the other tab catches up when shown.
+  function renderAnalytics() {
+    if (_activeTab === 'dashboard') renderDashboardCharts();
+    else renderEvaluate();
   }
 
   // ─── Bootstrap ───────────────────────────────────────────────────────────
