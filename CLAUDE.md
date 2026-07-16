@@ -144,6 +144,22 @@ do $$ begin
 end $$;
 ```
 
+## Working preferences
+
+- Claude commits and pushes automatically as work completes.
+- **Doc-update cadence: batch, don't drip.** [ToDo.md](./ToDo.md) gets touched at feature completion or when a decision lands — not after every edit; CLAUDE.md only when a convention, structure, or preference actually changes. Code commits stay frequent — it's the *prose* that batches.
+- Periodically archive: when ToDo.md's completed items outnumber the open ones, sweep the finished entries out (into the commit history / a status note) to keep it scannable.
+
+## Working efficiently (session cost)
+
+The whole transcript is re-sent every turn, so cost scales with session length and with heavy material kept in context. Without cutting rigor:
+
+- Prefer targeted reads (Grep, or Read with offset/limit) over whole-file reads; don't re-read a file already in context, and don't re-read after an Edit just to confirm it (Edit fails loudly if it didn't apply).
+- Don't take screenshots unless the user explicitly asks — verify programmatically instead (drive it headless and assert computed values / script output).
+- Prefer Edit over re-emitting whole blocks; don't paste large code back into chat.
+- Keep replies concise: briefly state what changed and the result, not a blow-by-blow of every step.
+- `frontend/index.html` is one big inline-JS HTML file — reading the relevant region is fine; just don't read the whole file twice.
+
 ## Planned features
 
 See **[ToDo.md](./ToDo.md)** for the full backlog with implementation notes.
