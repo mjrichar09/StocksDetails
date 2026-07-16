@@ -13,9 +13,10 @@ import yfinance as yf
 import pandas as pd
 
 from datetime import date
+import os
 
 from db import get_supabase, verify_jwt
-from cpi import ensure_cpi
+from cpi import ensure_cpi, cpi_at
 from etrade import start_oauth, complete_oauth, get_positions as etrade_positions, get_transactions as etrade_transactions
 from fidelity import parse_fidelity_csv, parse_fidelity_realized_gains, parse_fidelity_dividends
 
@@ -498,6 +499,146 @@ def _compute_exchange(symbol: str):
         return {"symbol": symbol, "exchange": exchange, "url": url}
     except Exception:
         return {"symbol": symbol, "exchange": "", "url": f"https://www.google.com/finance/quote/{symbol}"}
+
+
+# ─── Real returns vs benchmarks ───────────────────────────────────────────────
+
+HYSA_APY = float(os.getenv("HYSA_APY", "0.045"))
+
+
+def _spy_history():
+    """Dividend-adjusted SPY closes for the last 10 years, cached daily."""
+    def fetch():
+        hist = yf.download("SPY", period="10y", interval="1d",
+                           auto_adjust=True, progress=False)["Close"]
+        if isinstance(hist, pd.DataFrame):
+            hist = hist.squeeze()
+        return hist
+    return _cached("spy_history", 86400, fetch)
+
+
+def _spy_factor(hist, acquired: date):
+    """Growth factor of SPY from `acquired` (nearest prior trading day) to now."""
+    if hist is None or hist.empty:
+        return None
+    sub = hist.loc[:pd.Timestamp(acquired)]
+    base = sub.iloc[-1] if not sub.empty else hist.iloc[0]
+    if not base or pd.isna(base):
+        return None
+    return float(hist.iloc[-1]) / float(base)
+
+
+@app.get("/analytics/real-returns")
+def analytics_real_returns(user_id: str = Depends(current_user)):
+    """Per-holding annualized return vs inflation (CPI), SPY, and a HYSA rate."""
+    return _cached(f"realreturns:{user_id}", 3600, lambda: _compute_real_returns(user_id))
+
+
+def _compute_real_returns(user_id: str):
+    today = date.today()
+    empty = {"as_of": str(today), "hysa_apy": HYSA_APY, "needs_date": [], "holdings": []}
+    try:
+        db = get_supabase()
+        positions = _gather_positions(user_id, db)
+        if not positions:
+            return empty
+
+        acq_rows = db.table("position_acquisitions") \
+            .select("symbol,acquired_date,source").eq("user_id", user_id).execute()
+        acq = {r["symbol"]: r for r in acq_rows.data}
+
+        try:
+            cpi = ensure_cpi(db)
+        except Exception:
+            cpi = {}
+        cpi_now = cpi_at(cpi, today)
+        spy = _spy_history()
+
+        pct = lambda v: round(v * 100, 2) if v is not None else None
+        holdings, needs_date = [], []
+        for sym, v in positions.items():
+            cost, mv = v["cost_basis"], v["market_value"]
+            if cost <= 0:
+                continue
+            a = acq.get(sym)
+            if not a:
+                needs_date.append(sym)
+                continue
+
+            acquired = date.fromisoformat(a["acquired_date"])
+            years = max((today - acquired).days, 30) / 365.25
+            nominal_ann = (mv / cost) ** (1 / years) - 1
+
+            cpi_then = cpi_at(cpi, acquired)
+            if cpi_then and cpi_now:
+                cpi_ann = (cpi_now / cpi_then) ** (1 / years) - 1
+                real_ann = (1 + nominal_ann) / (1 + cpi_ann) - 1
+            else:
+                cpi_ann = real_ann = None
+
+            spy_f = _spy_factor(spy, acquired)
+            spy_ann = spy_f ** (1 / years) - 1 if spy_f else None
+
+            holdings.append({
+                "symbol":                sym,
+                "cost_basis":            round(cost, 2),
+                "market_value":          round(mv, 2),
+                "acquired_date":         a["acquired_date"],
+                "date_source":           a["source"],
+                "years_held":            round(years, 2),
+                "nominal_annualized_pct": pct(nominal_ann),
+                "cpi_annualized_pct":    pct(cpi_ann),
+                "real_annualized_pct":   pct(real_ann),
+                "spy_annualized_pct":    pct(spy_ann),
+                "spy_alt_value":         round(cost * spy_f, 2) if spy_f else None,
+                "hysa_alt_value":        round(cost * (1 + HYSA_APY) ** years, 2),
+                "beats_inflation":       real_ann > 0 if real_ann is not None else None,
+                "beats_hysa":            nominal_ann > HYSA_APY,
+                "beats_spy":             nominal_ann > spy_ann if spy_ann is not None else None,
+            })
+
+        holdings.sort(key=lambda h: h["real_annualized_pct"] if h["real_annualized_pct"] is not None else -1e9,
+                      reverse=True)
+        return {"as_of": str(today), "hysa_apy": HYSA_APY,
+                "needs_date": sorted(needs_date), "holdings": holdings}
+    except Exception:
+        return empty
+
+
+@app.get("/analytics/beta")
+def analytics_beta(user_id: str = Depends(current_user)):
+    """Weighted portfolio beta from yfinance per-symbol betas."""
+    return _cached(f"beta:{user_id}", 86400, lambda: _compute_beta(user_id))
+
+
+def _compute_beta(user_id: str):
+    try:
+        db = get_supabase()
+        positions = _gather_positions(user_id, db)
+        total_mv = sum(v["market_value"] for v in positions.values())
+        if not positions or not total_mv:
+            return {"portfolio_beta": None, "holdings": []}
+
+        holdings = []
+        for sym in list(positions.keys())[:20]:
+            try:
+                beta = yf.Ticker(sym).info.get("beta")
+            except Exception:
+                beta = None
+            holdings.append({
+                "symbol": sym,
+                "beta":   round(float(beta), 2) if beta is not None else None,
+                "weight": round(positions[sym]["market_value"] / total_mv, 4),
+            })
+
+        known = [h for h in holdings if h["beta"] is not None]
+        weight_sum = sum(h["weight"] for h in known)
+        portfolio_beta = round(sum(h["beta"] * h["weight"] for h in known) / weight_sum, 2) \
+            if weight_sum else None
+        holdings.sort(key=lambda h: h["beta"] if h["beta"] is not None else -1e9, reverse=True)
+        return {"portfolio_beta": portfolio_beta, "holdings": holdings}
+    except Exception:
+        return {"portfolio_beta": None, "holdings": []}
 
 
 @app.get("/status")

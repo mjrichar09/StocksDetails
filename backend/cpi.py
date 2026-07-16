@@ -9,7 +9,7 @@ Set BLS_API_KEY in .env to use the registered v2 API (500 req/day, 20 years).
 Fallback if BLS is ever unavailable: FRED series CPIAUCNS (needs FRED_API_KEY).
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 import os
 
 import requests
@@ -59,16 +59,26 @@ def _fetch_bls(start_year: int, end_year: int) -> list[dict]:
 def ensure_cpi(db) -> dict[str, float]:
     """Return the stored CPI series as {"YYYY-MM-01": value}, refreshing from
     BLS first if the newest stored month is more than ~35 days old."""
-    stored = db.table("cpi_monthly").select("month,value").eq("series_id", SERIES_ID) \
+    stored = db.table("cpi_monthly").select("month,value,fetched_at").eq("series_id", SERIES_ID) \
         .order("month", desc=True).limit(1).execute()
     newest = date.fromisoformat(stored.data[0]["month"]) if stored.data else None
 
-    if newest is None or date.today() - newest > timedelta(days=35):
+    # CPI publishes ~6 weeks after the month starts, so the newest data month is
+    # often "stale" — only re-hit BLS if we haven't tried within the last day.
+    now = datetime.now(timezone.utc)
+    last_fetch = datetime.fromisoformat(stored.data[0]["fetched_at"]) if stored.data else None
+    stale = newest is None or date.today() - newest > timedelta(days=35)
+    throttled = last_fetch is not None and now - last_fetch < timedelta(hours=20)
+
+    if stale and not throttled:
         start_year = newest.year if newest else date.today().year - _YEARS_BACK
-        rows = _fetch_bls(start_year, date.today().year)
+        try:
+            rows = _fetch_bls(start_year, date.today().year)
+        except Exception:
+            rows = []  # BLS down — serve what's stored
         if rows:
             db.table("cpi_monthly").upsert(
-                [{"series_id": SERIES_ID, **r} for r in rows],
+                [{"series_id": SERIES_ID, "fetched_at": now.isoformat(), **r} for r in rows],
                 on_conflict="series_id,month",
             ).execute()
 
