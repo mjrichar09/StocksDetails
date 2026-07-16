@@ -12,7 +12,10 @@ import time
 import yfinance as yf
 import pandas as pd
 
+from datetime import date
+
 from db import get_supabase, verify_jwt
+from cpi import ensure_cpi
 from etrade import start_oauth, complete_oauth, get_positions as etrade_positions, get_transactions as etrade_transactions
 from fidelity import parse_fidelity_csv, parse_fidelity_realized_gains, parse_fidelity_dividends
 
@@ -238,6 +241,82 @@ async def fidelity_upload_dividends(
         on_conflict="user_id,symbol,run_date,amount"
     ).execute()
     return {"status": "ok", "imported": len(rows)}
+
+
+# ─── Acquisition dates ────────────────────────────────────────────────────────
+
+class AcquisitionBody(BaseModel):
+    acquired_date: str  # YYYY-MM-DD
+
+
+@app.get("/acquisitions")
+def list_acquisitions(user_id: str = Depends(current_user)):
+    rows = get_supabase().table("position_acquisitions") \
+        .select("symbol,acquired_date,source").eq("user_id", user_id).execute()
+    return rows.data
+
+
+@app.put("/acquisitions/{symbol}")
+def set_acquisition(symbol: str, body: AcquisitionBody, user_id: str = Depends(current_user)):
+    try:
+        parsed = date.fromisoformat(body.acquired_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="acquired_date must be YYYY-MM-DD")
+    if parsed > date.today():
+        raise HTTPException(status_code=400, detail="acquired_date cannot be in the future")
+    get_supabase().table("position_acquisitions").upsert(
+        {
+            "user_id":       user_id,
+            "symbol":        symbol.upper(),
+            "acquired_date": body.acquired_date,
+            "source":        "manual",
+        },
+        on_conflict="user_id,symbol",
+    ).execute()
+    _invalidate_user_cache(user_id)
+    return {"status": "ok"}
+
+
+@app.post("/acquisitions/infer")
+def infer_acquisitions(user_id: str = Depends(current_user)):
+    """Infer acquisition dates from E*Trade buy history (earliest buy per symbol).
+    Never overwrites manual entries."""
+    db = get_supabase()
+    conn = db.table("etrade_connections").select("*").eq("user_id", user_id).execute()
+    if not conn.data:
+        return {"inferred": 0}
+
+    c = conn.data[0]
+    try:
+        txns = etrade_transactions(c["oauth_token"], c["oauth_token_secret"], c["env"])
+    except Exception:
+        return {"inferred": 0}
+
+    earliest_buy: dict[str, str] = {}
+    for t in txns:
+        ttype = t.get("transaction_type") or ""
+        sym = (t.get("symbol") or "").upper()
+        d = t.get("transaction_date")
+        if not sym or not d or not ("bought" in ttype or "buy" in ttype):
+            continue
+        if sym not in earliest_buy or d < earliest_buy[sym]:
+            earliest_buy[sym] = d
+
+    if not earliest_buy:
+        return {"inferred": 0}
+
+    existing = db.table("position_acquisitions") \
+        .select("symbol,source").eq("user_id", user_id).execute()
+    manual = {r["symbol"] for r in existing.data if r["source"] == "manual"}
+
+    rows = [
+        {"user_id": user_id, "symbol": sym, "acquired_date": d, "source": "etrade_inferred"}
+        for sym, d in earliest_buy.items() if sym not in manual
+    ]
+    if rows:
+        db.table("position_acquisitions").upsert(rows, on_conflict="user_id,symbol").execute()
+        _invalidate_user_cache(user_id)
+    return {"inferred": len(rows)}
 
 
 # ─── Analytics ────────────────────────────────────────────────────────────────

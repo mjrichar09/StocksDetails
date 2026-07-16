@@ -107,3 +107,42 @@ do $$ begin
       unique (user_id, symbol, run_date, amount);
   end if;
 end $$;
+
+-- ============================================================
+-- Migration: acquisition dates + CPI series (Evaluate suite)
+-- ============================================================
+
+-- Per-position acquisition date: inferred from E*Trade buys or entered manually.
+-- One row per (user, symbol); manual entries win over inferred ones.
+create table if not exists position_acquisitions (
+  id            uuid primary key default gen_random_uuid(),
+  user_id       uuid references auth.users(id) on delete cascade not null,
+  symbol        text not null,
+  acquired_date date not null,
+  source        text not null default 'manual',  -- 'manual' or 'etrade_inferred'
+  updated_at    timestamptz default now(),
+  unique (user_id, symbol)
+);
+
+alter table position_acquisitions enable row level security;
+
+do $$ begin
+  if not exists (select 1 from pg_policies where policyname = 'position_acquisitions: own rows only') then
+    create policy "position_acquisitions: own rows only"
+      on position_acquisitions for all
+      using (auth.uid() = user_id)
+      with check (auth.uid() = user_id);
+  end if;
+end $$;
+
+-- Monthly CPI series (global, shared by all users). RLS enabled with no
+-- policies: only the service-role backend can read/write it.
+create table if not exists cpi_monthly (
+  series_id  text not null default 'CUUR0000SA0',  -- BLS CPI-U, all items, NSA
+  month      date not null,                        -- first day of the month
+  value      numeric not null,
+  fetched_at timestamptz default now(),
+  primary key (series_id, month)
+);
+
+alter table cpi_monthly enable row level security;
